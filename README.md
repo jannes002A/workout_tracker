@@ -93,6 +93,14 @@ Four sections, top to bottom:
    several workouts gets a single heatmap with its days combined; extra
    movements appear here too, marked "extra, this session only".
 
+   Each movement carries a trend badge — **↑ going up**, **↓ going down** or
+   **→ holding steady** — comparing the first half of that movement's history
+   with the second half, with the percentage change where there is an earlier
+   baseline to compare against. A change within 15% either way counts as
+   holding steady. Hover the badge for both half-totals and the split date. A
+   movement performed on only one date gets no badge, since there is nothing to
+   compare.
+
 ## How it's put together
 
     main.py             entry point: create_app() + app.run(debug=True)

@@ -299,3 +299,141 @@ def test_analytics_page_renders_on_empty_db(client):
     response = client.get("/analytics")
     assert response.status_code == 200
     assert b"No sessions in this period yet" in response.data
+
+
+def test_analytics_page_shows_total_workouts_above_the_table(client, app):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        for day in (date(2026, 9, 1), date(2026, 9, 2), date(2026, 9, 3)):
+            services.log_session(workout.id, day, 45, {workout.movements[0].id: 10}, "good")
+    html = client.get("/analytics").data.decode()
+    stat = html.index("3 <span>workouts performed in total</span>")
+    assert html.index("Workouts performed") < stat < html.index("<table")
+
+
+def test_analytics_page_total_workouts_is_singular_for_one(client, app):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        services.log_session(workout.id, date(2026, 9, 1), 45, {workout.movements[0].id: 10}, "good")
+    html = client.get("/analytics").data.decode()
+    assert "1 <span>workout performed in total</span>" in html
+
+
+def test_analytics_workouts_table_shows_the_feeling_breakdown(client, app):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        reps = {workout.movements[0].id: 10}
+        services.log_session(workout.id, date(2026, 9, 1), 45, reps, "good")
+        services.log_session(workout.id, date(2026, 9, 2), 45, reps, "good")
+        services.log_session(workout.id, date(2026, 9, 3), 45, reps, "bad")
+    html = client.get("/analytics").data.decode()
+    table = html[html.index("<table") : html.index("</table>")]
+    for heading in ("Good", "Okay", "Bad"):
+        assert f"<th>{heading}</th>" in table
+    start = table.index("<td>Leg day</td>")
+    row = table[start : table.index("</tr>", start)]
+    cells = re.findall(r"<td[^>]*>([^<]*)</td>", row)
+    # workout, times done, good, okay, bad
+    assert cells == ["Leg day", "3", "2", "0", "1"]
+
+
+def test_analytics_page_draws_a_heatmap_per_movement(client, app):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat", "Lunge"])
+        services.log_session(
+            workout.id, date.today(), 45,
+            {m.id: v for m, v in zip(workout.movements, (30, 20))}, "good",
+        )
+    html = client.get("/analytics").data.decode()
+    section = html[html.index("Repetitions per movement") :]
+    assert section.count('class="heatmap"') == 2  # one per movement
+    assert "<h3>Squat" in section and "<h3>Lunge" in section
+    assert f'title="{date.today().isoformat()}: 30 repetitions"' in section
+    assert f'title="{date.today().isoformat()}: 20 repetitions"' in section
+    assert "<td>Squat</td>" not in section  # no table any more
+
+
+def test_analytics_heatmaps_are_labelled_with_month_and_year(client, app):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        services.log_session(workout.id, date.today(), 45, {workout.movements[0].id: 30}, "good")
+    html = client.get("/analytics").data.decode()
+    this_month = date.today().strftime("%b %Y")
+    a_year_ago = (date.today() - timedelta(days=364)).strftime("%b %Y")
+    # once for the activity map, once for the movement's own heatmap
+    assert html.count('class="heatmap-months"') == 2
+    for section in (html[: html.index("Repetitions per movement")],
+                    html[html.index("Repetitions per movement") :]):
+        assert f">{this_month}</span>" in section
+        assert f">{a_year_ago}</span>" in section
+        assert 'class="heatmap-month" style="--weeks:' in section
+
+
+def test_analytics_movement_heatmap_shades_the_best_day_darkest(client, app):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        movement_id = workout.movements[0].id
+        services.log_session(workout.id, date.today(), 45, {movement_id: 30}, "good")
+        services.log_session(
+            workout.id, date.today() - timedelta(days=1), 45, {movement_id: 5}, "good"
+        )
+    html = client.get("/analytics").data.decode()
+    section = html[html.index("Repetitions per movement") :]
+    today, yesterday = date.today(), date.today() - timedelta(days=1)
+    assert f'class="cell level-4" title="{today.isoformat()}: 30' in section
+    assert f'class="cell level-1" title="{yesterday.isoformat()}: 5' in section
+
+
+def test_analytics_page_notes_movements_never_performed(client, app):
+    with app.app_context():
+        services.create_workout("Core day", ["Plank"])
+    html = client.get("/analytics").data.decode()
+    section = html[html.index("Repetitions per movement") :]
+    assert "<h3>Plank</h3>" in section
+    assert "Not performed yet" in section
+    assert 'class="heatmap"' not in section
+
+
+def test_analytics_page_badges_each_movements_trend(client, app):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Rising", "Falling", "Zero"])
+        ids = {m.name: m.id for m in workout.movements}
+        for week, (up, down) in enumerate(((5, 40), (20, 25), (35, 10))):
+            services.log_session(
+                workout.id,
+                date.today() - timedelta(weeks=2 - week),
+                45,
+                {ids["Rising"]: up, ids["Falling"]: down, ids["Zero"]: 0},
+                "good",
+            )
+    html = client.get("/analytics").data.decode()
+    section = html[html.index("Repetitions per movement") :]
+    assert '<h3>Rising<span class="trend trend-up"' in section
+    assert "↑ going up" in section
+    assert '<h3>Falling<span class="trend trend-down"' in section
+    assert "↓ going down" in section
+    # 'Zero' is 0 in every session: no change either way
+    assert '<h3>Zero<span class="trend trend-similar"' in section
+    assert "→ holding steady" in section
+
+
+def test_analytics_page_omits_the_trend_when_there_is_one_date(client, app):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        services.log_session(workout.id, date.today(), 45, {workout.movements[0].id: 30}, "good")
+    html = client.get("/analytics").data.decode()
+    section = html[html.index("Repetitions per movement") :]
+    assert "<h3>Squat</h3>" in section
+    assert 'class="trend' not in section
+
+
+def test_analytics_trend_badge_shows_the_percentage_change(client, app):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        movement_id = workout.movements[0].id
+        services.log_session(
+            workout.id, date.today() - timedelta(days=2), 45, {movement_id: 20}, "good"
+        )
+        services.log_session(workout.id, date.today(), 45, {movement_id: 30}, "good")
+    html = client.get("/analytics").data.decode()
+    assert "↑ going up (+50%)" in html

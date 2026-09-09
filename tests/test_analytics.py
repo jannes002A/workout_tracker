@@ -152,6 +152,13 @@ def test_movement_repetitions_includes_never_performed_movements(app):
             "workouts": ["Core day"],
             "extra": False,
             "heatmap": None,
+            "trend": {
+                "direction": None,
+                "early": 0,
+                "late": 0,
+                "change": None,
+                "split": None,
+            },
         }
     ]
 
@@ -315,6 +322,138 @@ def test_movement_heatmap_has_the_same_month_axis(app, seeded):
 def test_movement_never_performed_has_no_heatmap(app):
     services.create_workout("Core day", ["Plank"])
     assert services.movement_repetitions()[0]["heatmap"] is None
+
+
+# ------------------------------------ movement_repetitions: the repetition trend
+
+
+@pytest.fixture()
+def weekly(app):
+    """One workout logged weekly for 10 weeks, with three shapes of history."""
+    workout = services.create_workout("Test", ["Rising", "Falling", "Steady"])
+    ids = {m.name: m.id for m in workout.movements}
+    start = date(2026, 6, 1)
+    for week in range(10):
+        services.log_session(
+            workout.id,
+            start + timedelta(weeks=week),
+            45,
+            {
+                ids["Rising"]: 5 + week * 3,
+                ids["Falling"]: 40 - week * 3,
+                ids["Steady"]: 20 + (week % 2),
+            },
+            "good",
+        )
+    return workout
+
+
+def trend_of(name, end=date(2026, 8, 15)):
+    return next(
+        r for r in services.movement_repetitions(end=end) if r["name"] == name
+    )["trend"]
+
+
+def test_trend_detects_rising_repetitions(app, weekly):
+    trend = trend_of("Rising")
+    assert trend["direction"] == "up"
+    assert trend["late"] > trend["early"]
+    assert trend["change"] > services.REPETITION_TREND_TOLERANCE
+
+
+def test_trend_detects_falling_repetitions(app, weekly):
+    trend = trend_of("Falling")
+    assert trend["direction"] == "down"
+    assert trend["late"] < trend["early"]
+    assert trend["change"] < -services.REPETITION_TREND_TOLERANCE
+
+
+def test_trend_calls_small_changes_similar(app, weekly):
+    trend = trend_of("Steady")
+    assert trend["direction"] == "similar"
+    assert abs(trend["change"]) <= services.REPETITION_TREND_TOLERANCE
+
+
+def test_trend_halves_account_for_every_repetition(app, weekly):
+    for row in services.movement_repetitions(end=date(2026, 8, 15)):
+        assert row["trend"]["early"] + row["trend"]["late"] == row["repetitions"]
+
+
+def test_trend_change_is_the_fraction_the_later_half_differs_by(app):
+    workout = services.create_workout("Leg day", ["Squat"])
+    movement_id = workout.movements[0].id
+    services.log_session(workout.id, date(2026, 9, 1), 45, {movement_id: 20}, "good")
+    services.log_session(workout.id, date(2026, 9, 3), 45, {movement_id: 30}, "good")
+    trend = trend_of("Squat", end=date(2026, 9, 8))
+    assert (trend["early"], trend["late"]) == (20, 30)
+    assert trend["change"] == 0.5  # +50%
+
+
+@pytest.mark.parametrize(
+    "tolerance_case,expected",
+    [(1.15, "similar"), (1.16, "up"), (0.85, "similar"), (0.84, "down")],
+)
+def test_trend_tolerance_boundary(app, tolerance_case, expected):
+    """±15% is still 'similar'; just past it becomes a direction."""
+    workout = services.create_workout("Leg day", ["Squat"])
+    movement_id = workout.movements[0].id
+    services.log_session(workout.id, date(2026, 9, 1), 45, {movement_id: 100}, "good")
+    services.log_session(
+        workout.id, date(2026, 9, 3), 45, {movement_id: round(100 * tolerance_case)}, "good"
+    )
+    assert trend_of("Squat", end=date(2026, 9, 8))["direction"] == expected
+
+
+def test_trend_is_unknown_for_a_single_date(app):
+    workout = services.create_workout("Leg day", ["Squat"])
+    services.log_session(
+        workout.id, date(2026, 9, 1), 45, {workout.movements[0].id: 30}, "good"
+    )
+    trend = trend_of("Squat", end=date(2026, 9, 8))
+    assert trend["direction"] is None
+    assert trend["split"] is None
+
+
+def test_trend_is_unknown_for_a_movement_never_performed(app):
+    services.create_workout("Core day", ["Plank"])
+    assert services.movement_repetitions()[0]["trend"]["direction"] is None
+
+
+def test_trend_is_up_with_no_earlier_baseline(app):
+    """Nothing in the earlier half, something in the later one: up, but no %."""
+    workout = services.create_workout("Leg day", ["Squat"])
+    movement_id = workout.movements[0].id
+    services.log_session(workout.id, date(2026, 9, 1), 45, {movement_id: 0}, "good")
+    services.log_session(workout.id, date(2026, 9, 3), 45, {movement_id: 30}, "good")
+    trend = trend_of("Squat", end=date(2026, 9, 8))
+    assert trend["direction"] == "up"
+    assert (trend["early"], trend["late"]) == (0, 30)
+    assert trend["change"] is None
+
+
+def test_trend_of_extra_only_movement(app):
+    workout = services.create_workout("Leg day", ["Squat"])
+    for day, reps in ((date(2026, 9, 1), 5), (date(2026, 9, 5), 20)):
+        services.log_session(
+            workout.id, day, 45, {workout.movements[0].id: 10}, "good",
+            extra_movements=[("Pull-up", reps)],
+        )
+    assert trend_of("Pull-up", end=date(2026, 9, 8))["direction"] == "up"
+
+
+def test_trend_reads_the_whole_history_not_just_the_heatmap_window(app):
+    """Sessions older than the heatmap window still shape the trend."""
+    workout = services.create_workout("Leg day", ["Squat"])
+    movement_id = workout.movements[0].id
+    services.log_session(workout.id, date(2020, 1, 1), 45, {movement_id: 100}, "good")
+    services.log_session(workout.id, date(2026, 9, 1), 45, {movement_id: 10}, "good")
+    row = next(
+        r for r in services.movement_repetitions(end=date(2026, 9, 8))
+        if r["name"] == "Squat"
+    )
+    assert row["heatmap"]["max"] == 10  # only the recent session is on the grid
+    assert row["trend"]["direction"] == "down"  # but the trend sees both
+    assert (row["trend"]["early"], row["trend"]["late"]) == (100, 10)
 
 
 # ------------------------------------------------------------- feeling_trend

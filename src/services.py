@@ -22,6 +22,7 @@ DURATION_CHOICES = list(range(10, 91, 5))  # 10-90 minutes
 REPETITION_CHOICES = list(range(0, 121))  # 0-120, 0 meaning skipped
 TREND_DAYS = 30  # window of the feeling graph on the analytics page
 MOVEMENT_HEATMAP_DAYS = 365  # window of each per-movement heatmap
+REPETITION_TREND_TOLERANCE = 0.15  # within ±15% counts as holding steady
 
 
 class ValidationError(ValueError):
@@ -214,6 +215,54 @@ def _calendar_weeks(
     return {"weeks": weeks, "max": max_count, "months": months}
 
 
+def _repetition_trend(dates: dict[date_type, int]) -> dict:
+    """Whether a movement's repetitions are going up, going down or holding.
+
+    Splits the movement's own history — the span from the first date it was
+    performed to the last — into two halves of equal length and compares the
+    repetitions done in each. Returns
+    {"direction": "up" | "down" | "similar" | None, "early": int, "late": int,
+     "change": float | None, "split": iso string | None}, where `change` is the
+    fraction the later half differs by (0.5 being +50%) and `split` is the last
+    date counted as early.
+
+    `direction` is None when everything falls on a single date, which is too
+    little to read a trend from. A change within REPETITION_TREND_TOLERANCE
+    either way counts as "similar". For an even span the earlier half takes the
+    middle day. `change` is None when the earlier half is 0, since there is no
+    baseline to be a percentage of.
+    """
+    nothing = {"direction": None, "early": 0, "late": 0, "change": None, "split": None}
+    if not dates:
+        return nothing
+
+    first, last = min(dates), max(dates)
+    span = (last - first).days
+    if span == 0:
+        return nothing
+
+    split = first + timedelta(days=span // 2)
+    early = sum(reps for day, reps in dates.items() if day <= split)
+    late = sum(reps for day, reps in dates.items() if day > split)
+
+    if early == 0:
+        direction, change = ("up" if late > 0 else "similar"), None
+    else:
+        change = (late - early) / early
+        if abs(change) <= REPETITION_TREND_TOLERANCE:
+            direction = "similar"
+        else:
+            direction = "up" if change > 0 else "down"
+
+    return {
+        "direction": direction,
+        "early": early,
+        "late": late,
+        "change": change,
+        "split": split.isoformat(),
+    }
+
+
 def activity_map(end: date_type | None = None, days: int = 365) -> dict:
     """GitHub-style activity data: one cell per day for the last `days` days.
 
@@ -275,6 +324,10 @@ def movement_repetitions(end: date_type | None = None) -> list[dict]:
     to and `extra` says whether it was ever logged as a session-only extra.
     Movements never performed are included with a total of 0.
 
+    `trend` says whether its repetitions are going up, down or holding steady;
+    see `_repetition_trend`. It reads the movement's whole history, not just the
+    window drawn in `heatmap`.
+
     `heatmap` is the movement's history as a calendar grid of the last
     MOVEMENT_HEATMAP_DAYS days — the same shape as `activity_map`, but with each
     cell counting repetitions instead of sessions, shaded relative to that
@@ -294,6 +347,7 @@ def movement_repetitions(end: date_type | None = None) -> list[dict]:
                 "workouts": [],
                 "extra": False,
                 "heatmap": None,
+                "trend": _repetition_trend({}),
             },
         )
 
@@ -369,7 +423,9 @@ def movement_repetitions(end: date_type | None = None) -> list[dict]:
         dates[day] = dates.get(day, 0) + int(reps or 0)
 
     for name, dates in per_date.items():
-        bucket(name)["heatmap"] = _calendar_weeks(dates, end, MOVEMENT_HEATMAP_DAYS)
+        row = bucket(name)
+        row["heatmap"] = _calendar_weeks(dates, end, MOVEMENT_HEATMAP_DAYS)
+        row["trend"] = _repetition_trend(dates)
 
     for row in buckets.values():
         row["workouts"].sort()

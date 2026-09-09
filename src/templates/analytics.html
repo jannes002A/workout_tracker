@@ -27,6 +27,17 @@
   </div>
 {% endmacro %}
 
+{# Up / down / steady badge for a movement's repetition trend. Renders nothing
+   at all when there is no direction, so the heading stays clean. #}
+{%- macro trend_badge(trend) -%}
+{%- if trend.direction -%}
+  {%- set arrows = {'up': '↑', 'down': '↓', 'similar': '→'} -%}
+  {%- set words = {'up': 'going up', 'down': 'going down', 'similar': 'holding steady'} -%}
+  {%- set pct = ((trend.change * 100) | round | int) if trend.change is not none else none -%}
+  <span class="trend trend-{{ trend.direction }}" title="Earlier half: {{ trend.early }} repetitions up to {{ trend.split }}. Later half: {{ trend.late }}.">{{ arrows[trend.direction] }} {{ words[trend.direction] }}{% if pct is not none %} ({{ '+' if pct > 0 else '' }}{{ pct }}%){% endif %}</span>
+{%- endif -%}
+{%- endmacro %}
+
 {% macro heatmap_legend() %}
   <p class="legend">Less
     <span class="cell level-0"></span><span class="cell level-1"></span><span class="cell level-2"></span><span class="cell level-3"></span><span class="cell level-4"></span>
@@ -122,13 +133,13 @@
 
 <section>
   <h2>Repetitions per movement</h2>
-  <p class="lede">Every movement across all of your workouts, and how many repetitions you did of it on each day of the last 12 months. Each movement is shaded against its own busiest day.</p>
+  <p class="lede">Every movement across all of your workouts, and how many repetitions you did of it on each day of the last 12 months. Each movement is shaded against its own busiest day. The trend splits a movement's history in half and compares the repetitions in each, so it says whether you are doing more of it, less of it, or about the same.</p>
   {% if movements %}
     <p class="big-stat">{{ movements | sum(attribute='repetitions') }} <span>repetitions in total</span></p>
     {{ heatmap_legend() }}
     {% for row in movements %}
       <article class="movement-block">
-        <h3>{{ row.name }}</h3>
+        <h3>{{ row.name }}{{ trend_badge(row.trend) }}</h3>
         {%- set labels = row.workouts + ['extra, this session only'] if row.extra else row.workouts %}
         <p class="chart-caption">
           {%- if row.heatmap %}

@@ -238,6 +238,20 @@ button.ghost:hover { border-style: solid; }
 .movement-block { margin-top: 1.75rem; }
 .movement-block h3 { font-stretch: 85%; font-weight: 700; margin: 0 0 0.15rem; }
 .chart-caption { color: var(--ink-soft); font-size: 0.85rem; margin: 0; }
+
+.trend {
+  font-size: 0.7rem;
+  font-weight: 400;
+  font-stretch: 100%;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  margin-left: 0.5rem;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.trend-up { background: #e2f2e8; color: var(--feel-good); }
+.trend-down { background: #f7e4e1; color: var(--feel-bad); }
+.trend-similar { background: var(--heat-0); color: var(--ink-soft); }
 .legend { color: var(--ink-soft); font-size: 0.85rem; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .legend .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; margin-left: 0.6rem; }
 .legend .swatch:first-child { margin-left: 0; }
