@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Users · Training Log{% endblock %}
+{% block content %}
+<h1>Users</h1>
+<p class="lede">Everyone whose sessions are tracked. Workouts are shared by all users — each session is logged against the person who did it.</p>
+
+<form method="post" class="panel">
+  <label for="name">Name</label>
+  <input id="name" name="name" type="text" placeholder="e.g. Alex" required>
+
+  <label for="age">Age</label>
+  <input id="age" name="age" type="number" inputmode="numeric"
+         min="{{ min_age }}" max="{{ max_age }}" placeholder="e.g. 34" required>
+
+  <button type="submit">Save user</button>
+</form>
+
+<h2>Everyone tracking</h2>
+{% if users %}
+  <ul class="workout-list">
+    {% for u in users %}
+      <li>
+        <strong>{{ u.name }}</strong>
+        <span>{{ u.age }} years old · {{ u.sessions | length }} session{{ '' if u.sessions | length == 1 else 's' }}
+          · <a href="{{ url_for('main.analytics', user_id=u.id) }}">analytics</a></span>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="empty">No users yet. Add the first one above.</p>
+{% endif %}
+{% endblock %}
