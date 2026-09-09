@@ -1,0 +1,16 @@
+[project]
+name = "workout-tracker"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "flask>=3.0",
+    "flask-sqlalchemy>=3.1",
+]
+
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]

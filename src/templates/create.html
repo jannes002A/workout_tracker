@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Create workout · Training Log{% endblock %}
+{% block content %}
+<h1>Create a workout</h1>
+<p class="lede">Name the workout and list every movement that belongs to it.</p>
+
+<form method="post" class="panel">
+  <label for="name">Workout name</label>
+  <input id="name" name="name" type="text" placeholder="e.g. Leg day" required>
+
+  <label>Movements</label>
+  <div id="movement-list">
+    <input name="movements" type="text" placeholder="e.g. Back squat" required>
+    <input name="movements" type="text" placeholder="e.g. Lunges">
+  </div>
+  <button type="button" class="ghost" onclick="addMovement()">Add another movement</button>
+
+  {% if known_movements %}
+    <p class="picker-label">Or select a movement you've already used</p>
+    <div class="movement-picker">
+      {% for name in known_movements %}
+        <button type="button" class="chip" data-movement="{{ name }}">{{ name }}</button>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <button type="submit">Save workout</button>
+</form>
+
+<h2>Your workouts</h2>
+{% if workouts %}
+  <ul class="workout-list">
+    {% for w in workouts %}
+      <li>
+        <strong>{{ w.name }}</strong>
+        <span>{{ w.movements | map(attribute='name') | join(', ') }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="empty">No workouts yet. Create your first one above.</p>
+{% endif %}
+
+<script>
+function addMovement(value) {
+  const input = document.createElement('input');
+  input.name = 'movements';
+  input.type = 'text';
+  input.placeholder = 'Movement name';
+  if (value) input.value = value;
+  document.getElementById('movement-list').appendChild(input);
+  input.focus();
+  return input;
+}
+
+// Selecting a known movement fills in a field instead of retyping it: the first
+// empty field if there is one, otherwise a new one. Names already on the form
+// are ignored, so selecting twice can't add the same movement twice.
+document.querySelector('.movement-picker')?.addEventListener('click', (event) => {
+  const chip = event.target.closest('[data-movement]');
+  if (!chip) return;
+  const name = chip.dataset.movement;
+  const fields = Array.from(document.querySelectorAll('#movement-list input'));
+  if (fields.some((f) => f.value.trim().toLowerCase() === name.toLowerCase())) return;
+  const empty = fields.find((f) => !f.value.trim());
+  if (empty) {
+    empty.value = name;
+    empty.focus();
+  } else {
+    addMovement(name);
+  }
+});
+</script>
+{% endblock %}

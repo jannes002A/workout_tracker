@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Analytics · Training Log{% endblock %}
+
+{# GitHub-style calendar grid, shared by the activity map and the per-movement
+   heatmaps: one cell per day, shaded 0-4 relative to the busiest day. #}
+{% macro heatmap(data, label, unit) %}
+  <div class="heatmap-wrap">
+    {# Each label spans its month's week columns, so it lines up with the grid. #}
+    <div class="heatmap-months" aria-hidden="true">
+      {% for month in data.months %}
+        <span class="heatmap-month" style="--weeks: {{ month.weeks }}">{{ month.label }}</span>
+      {% endfor %}
+    </div>
+    <div class="heatmap" role="img" aria-label="{{ label }}">
+      {% for week in data.weeks %}
+        <div class="heatmap-week">
+          {% for cell in week %}
+            {% if cell %}
+              <span class="cell level-{{ cell.level }}" title="{{ cell.date }}: {{ cell.count }} {{ unit }}{{ '' if cell.count == 1 else 's' }}"></span>
+            {% else %}
+              <span class="cell pad"></span>
+            {% endif %}
+          {% endfor %}
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+{% endmacro %}
+
+{% macro heatmap_legend() %}
+  <p class="legend">Less
+    <span class="cell level-0"></span><span class="cell level-1"></span><span class="cell level-2"></span><span class="cell level-3"></span><span class="cell level-4"></span>
+  More</p>
+{% endmacro %}
+
+{% block content %}
+<h1>Analytics</h1>
+
+<section>
+  <h2>Activity, last 12 months</h2>
+  {{ heatmap(activity, "Daily workout activity for the last year", "session") }}
+  {{ heatmap_legend() }}
+</section>
+
+<section>
+  <h2>Workouts performed</h2>
+  {% set total_sessions = frequency | sum(attribute='count') %}
+  <p class="big-stat">{{ total_sessions }} <span>workout{{ '' if total_sessions == 1 else 's' }} performed in total</span></p>
+  {% if frequency %}
+    <table class="freq-table wide">
+      <thead>
+        <tr>
+          <th>Workout</th><th>Times done</th>
+          <th>Good</th><th>Okay</th><th>Bad</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in frequency %}
+          <tr>
+            <td>{{ row.name }}</td>
+            <td>{{ row.count }}</td>
+            {% for f in ['good', 'okay', 'bad'] %}
+              <td{% if not row.feelings[f] %} class="muted"{% endif %}>{{ row.feelings[f] }}</td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">No workouts yet — <a href="{{ url_for('main.create') }}">create one</a> to get started.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>How it felt, last {{ trend_days }} days</h2>
+  <p class="lede">One bar per workout day between {{ trend.start.strftime('%d %b %Y') }} and {{ trend.end.strftime('%d %b %Y') }}. Taller is better; days without a workout show a flat marker.</p>
+
+  {% set left = 34 %}
+  {% set slot = 20 %}
+  {% set bar_w = 12 %}
+  {% set base_y = 128 %}
+  {% set plot_h = 120 %}
+  {% set width = left + trend.days | length * slot + 8 %}
+  <div class="chart-scroll">
+    <svg class="feeling-chart" viewBox="0 0 {{ width }} 164" width="{{ width }}" height="164"
+         role="img" aria-label="Feeling per day over the last {{ trend_days }} days: {{ trend.totals.good }} good, {{ trend.totals.okay }} okay, {{ trend.totals.bad }} bad sessions.">
+      {% for label, score in [('good', 3), ('okay', 2), ('bad', 1)] %}
+        {% set y = base_y - (score * plot_h / 3) | round | int %}
+        <line class="grid" x1="{{ left }}" y1="{{ y }}" x2="{{ width - 8 }}" y2="{{ y }}"></line>
+        <text class="axis" x="{{ left - 6 }}" y="{{ y + 4 }}" text-anchor="end">{{ label }}</text>
+      {% endfor %}
+      <line class="axis-line" x1="{{ left }}" y1="{{ base_y }}" x2="{{ width - 8 }}" y2="{{ base_y }}"></line>
+
+      {% for day in trend.days %}
+        {% set x = left + loop.index0 * slot + (slot - bar_w) / 2 %}
+        {% if day.sessions %}
+          {% set h = (day.score * plot_h / 3) | round | int %}
+          <rect class="bar bar-{{ day.feeling }}" x="{{ x }}" y="{{ base_y - h }}" width="{{ bar_w }}" height="{{ h }}" rx="2">
+            <title>{{ day.date }}: {{ day.sessions }} session{{ '' if day.sessions == 1 else 's' }}, felt {{ day.feeling }}</title>
+          </rect>
+        {% else %}
+          <rect class="bar bar-rest" x="{{ x }}" y="{{ base_y - 2 }}" width="{{ bar_w }}" height="2">
+            <title>{{ day.date }}: no workout</title>
+          </rect>
+        {% endif %}
+        {% if loop.index0 % 5 == 0 or loop.last %}
+          <text class="axis" x="{{ x + bar_w / 2 }}" y="{{ base_y + 18 }}" text-anchor="middle">{{ day.date[8:10] }}</text>
+        {% endif %}
+      {% endfor %}
+    </svg>
+  </div>
+
+  <p class="legend">
+    {% for f in ['good', 'okay', 'bad'] %}
+      <span class="swatch swatch-{{ f }}"></span>{{ f }} · {{ trend.totals[f] }}
+    {% endfor %}
+  </p>
+  {% if not trend.sessions %}
+    <p class="empty">No sessions in this period yet — <a href="{{ url_for('main.track') }}">track one</a>.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Repetitions per movement</h2>
+  <p class="lede">Every movement across all of your workouts, and how many repetitions you did of it on each day of the last 12 months. Each movement is shaded against its own busiest day.</p>
+  {% if movements %}
+    <p class="big-stat">{{ movements | sum(attribute='repetitions') }} <span>repetitions in total</span></p>
+    {{ heatmap_legend() }}
+    {% for row in movements %}
+      <article class="movement-block">
+        <h3>{{ row.name }}</h3>
+        {%- set labels = row.workouts + ['extra, this session only'] if row.extra else row.workouts %}
+        <p class="chart-caption">
+          {%- if row.heatmap %}
+            {{ row.repetitions }} repetition{{ '' if row.repetitions == 1 else 's' }}
+            across {{ row.times }} session{{ '' if row.times == 1 else 's' }}
+            · best day {{ row.heatmap.max }}
+          {%- else %}
+            Not performed yet
+          {%- endif %}
+          {%- if labels %} · {{ labels | join(', ') }}{% endif %}
+        </p>
+        {% if row.heatmap %}
+          {{ heatmap(row.heatmap, row.name ~ ": repetitions per day over the last year, up to " ~ row.heatmap.max ~ " on a day.", "repetition") }}
+        {% endif %}
+      </article>
+    {% endfor %}
+  {% else %}
+    <p class="empty">Nothing to analyse yet — create a workout and track a session first.</p>
+  {% endif %}
+</section>
+{% endblock %}
