@@ -47,6 +47,26 @@
 {% block content %}
 <h1>Analytics</h1>
 
+{# Picking a user reloads the page with ?user_id=, so every section below is
+   computed for that user alone. The submit button keeps it working without JS. #}
+<form method="get" action="{{ url_for('main.analytics') }}" class="user-filter">
+  <label for="{{ user_field }}">Show</label>
+  <select id="{{ user_field }}" name="{{ user_field }}" onchange="this.form.submit()">
+    <option value="">All users</option>
+    {% for u in users %}
+      <option value="{{ u.id }}" {% if user and u.id == user.id %}selected{% endif %}>{{ u.name }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Show</button>
+</form>
+<p class="lede">
+  {%- if user %}
+    Everything {{ user.name }} ({{ user.age }}) has logged — only the workouts and movements they have actually performed.
+  {%- else %}
+    Everything logged so far, across all users. Pick a user above for their numbers alone.
+  {%- endif %}
+</p>
+
 <section>
   <h2>Activity, last 12 months</h2>
   {{ heatmap(activity, "Daily workout activity for the last year", "session") }}
@@ -77,6 +97,8 @@
         {% endfor %}
       </tbody>
     </table>
+  {% elif user %}
+    <p class="empty">{{ user.name }} hasn't performed a workout yet — <a href="{{ url_for('main.track') }}">track one</a>.</p>
   {% else %}
     <p class="empty">No workouts yet — <a href="{{ url_for('main.create') }}">create one</a> to get started.</p>
   {% endif %}
@@ -133,7 +155,7 @@
 
 <section>
   <h2>Repetitions per movement</h2>
-  <p class="lede">Every movement across all of your workouts, and how many repetitions you did of it on each day of the last 12 months. Each movement is shaded against its own busiest day. The trend splits a movement's history in half and compares the repetitions in each, so it says whether you are doing more of it, less of it, or about the same.</p>
+  <p class="lede">{% if user %}Every movement {{ user.name }} has performed{% else %}Every movement across all of your workouts{% endif %}, and how many repetitions you did of it on each day of the last 12 months. Each movement is shaded against its own busiest day. The trend splits a movement's history in half and compares the repetitions in each, so it says whether you are doing more of it, less of it, or about the same.</p>
   {% if movements %}
     <p class="big-stat">{{ movements | sum(attribute='repetitions') }} <span>repetitions in total</span></p>
     {{ heatmap_legend() }}
@@ -156,8 +178,34 @@
         {% endif %}
       </article>
     {% endfor %}
+  {% elif user %}
+    <p class="empty">{{ user.name }} hasn't performed a movement yet — <a href="{{ url_for('main.track') }}">track a session</a>.</p>
   {% else %}
     <p class="empty">Nothing to analyse yet — create a workout and track a session first.</p>
   {% endif %}
 </section>
+<section>
+  <h2>Session comments</h2>
+  <p class="lede">Everything noted down while tracking, most recent first.</p>
+  {% if comments %}
+    <ol class="comment-log">
+      {% for c in comments %}
+        <li>
+          <p class="comment-meta">
+            <time datetime="{{ c.date.isoformat() }}">{{ c.date.strftime('%d %b %Y') }}</time>
+            · {{ c.workout }}
+            {%- if not user %} · {{ c.user }}{% endif %}
+            · <span class="swatch swatch-{{ c.feeling }}"></span>felt {{ c.feeling }}
+          </p>
+          <p class="comment-text">{{ c.comment }}</p>
+        </li>
+      {% endfor %}
+    </ol>
+  {% elif user %}
+    <p class="empty">{{ user.name }} hasn't left a comment yet — add one when you <a href="{{ url_for('main.track') }}">track a session</a>.</p>
+  {% else %}
+    <p class="empty">No comments yet — add one when you <a href="{{ url_for('main.track') }}">track a session</a>.</p>
+  {% endif %}
+</section>
+
 {% endblock %}

@@ -13,6 +13,7 @@ from src.models import (
     FEELINGS,
     Movement,
     SessionMovement,
+    User,
     Workout,
     WorkoutSession,
     db,
@@ -23,10 +24,43 @@ REPETITION_CHOICES = list(range(0, 121))  # 0-120, 0 meaning skipped
 TREND_DAYS = 30  # window of the feeling graph on the analytics page
 MOVEMENT_HEATMAP_DAYS = 365  # window of each per-movement heatmap
 REPETITION_TREND_TOLERANCE = 0.15  # within ±15% counts as holding steady
+MIN_AGE, MAX_AGE = 1, 120  # bounds of the age field, and of its error message
+MAX_COMMENT_LENGTH = 2000  # cap on a session's free-text note
 
 
 class ValidationError(ValueError):
     """Raised when user input is invalid."""
+
+
+# ------------------------------------------------------------------- users
+
+
+def create_user(name: str, age: int) -> User:
+    """Create a user. Names are unique, compared case-insensitively."""
+    name = (name or "").strip()
+    if not name:
+        raise ValidationError("User name is required.")
+    if not isinstance(age, int) or not MIN_AGE <= age <= MAX_AGE:
+        raise ValidationError(f"Age must be between {MIN_AGE} and {MAX_AGE}.")
+    if User.query.filter(db.func.lower(User.name) == name.lower()).first():
+        raise ValidationError(f"A user named '{name}' already exists.")
+
+    user = User(name=name, age=age)
+    db.session.add(user)
+    db.session.commit()
+    return user
+
+
+def get_all_users() -> list[User]:
+    """All users, alphabetically."""
+    return User.query.order_by(User.name).all()
+
+
+def get_user(user_id: int | None) -> User | None:
+    """The user with that id, or None for a missing id or an unknown one."""
+    if user_id is None:
+        return None
+    return db.session.get(User, user_id)
 
 
 # ---------------------------------------------------------------- workouts
@@ -82,13 +116,15 @@ def known_movement_names() -> list[str]:
 
 def log_session(
     workout_id: int,
+    user_id: int,
     session_date: date_type,
     duration_minutes: int,
     repetitions_by_movement: dict[int, int],
     feeling: str,
     extra_movements: list[tuple[str, int]] | None = None,
+    comment: str = "",
 ) -> WorkoutSession:
-    """Record a performed workout, with repetitions for each of its movements.
+    """Record a performed workout by one user, movement by movement.
 
     `repetitions_by_movement` maps movement id -> repetitions. Every movement of
     the workout must be present; ids belonging to other workouts are ignored,
@@ -98,16 +134,27 @@ def log_session(
     session only. They are logged against the session without being added to the
     workout, so they never show up on the track form again. Pairs with a blank
     name are dropped, so an untouched row on the form is simply ignored.
+
+    `comment` is a free-text note about the session. It is stripped, and a blank
+    one is stored as NULL rather than an empty string, so `session_comments` can
+    pick out the sessions that actually have something to say.
     """
     workout = db.session.get(Workout, workout_id)
     if not workout:
         raise ValidationError("Select a workout that exists.")
+    if not db.session.get(User, user_id):
+        raise ValidationError("Select a user that exists.")
     if duration_minutes not in DURATION_CHOICES:
         raise ValidationError("Duration must be between 10 and 90 minutes.")
     if feeling not in FEELINGS:
         raise ValidationError("Feeling must be good, okay or bad.")
     if not isinstance(session_date, date_type):
         raise ValidationError("Invalid date.")
+    comment = (comment or "").strip()
+    if len(comment) > MAX_COMMENT_LENGTH:
+        raise ValidationError(
+            f"Keep the comment under {MAX_COMMENT_LENGTH} characters."
+        )
 
     provided = repetitions_by_movement or {}
     logs = []
@@ -145,9 +192,11 @@ def log_session(
 
     session = WorkoutSession(
         workout_id=workout_id,
+        user_id=user_id,
         date=session_date,
         duration_minutes=duration_minutes,
         feeling=feeling,
+        comment=comment or None,
     )
     session.logs = logs
     db.session.add(session)
@@ -162,6 +211,18 @@ def date_choices(days_back: int = 30, today: date_type | None = None) -> list[da
 
 
 # ---------------------------------------------------------------- analytics
+
+
+def _for_user(query, user_id: int | None):
+    """Narrow a query that selects sessions down to one user.
+
+    Every analytics function takes a `user_id`; None means "everyone", which is
+    what the page shows until a user is picked from its dropdown. Apply this
+    before grouping, so the filter lands in the WHERE clause.
+    """
+    if user_id is None:
+        return query
+    return query.filter(WorkoutSession.user_id == user_id)
 
 
 def _calendar_weeks(
@@ -263,42 +324,59 @@ def _repetition_trend(dates: dict[date_type, int]) -> dict:
     }
 
 
-def activity_map(end: date_type | None = None, days: int = 365) -> dict:
+def activity_map(
+    end: date_type | None = None, days: int = 365, user_id: int | None = None
+) -> dict:
     """GitHub-style activity data: one cell per day for the last `days` days.
 
-    Cells count the sessions logged that day; see `_calendar_weeks` for the
-    returned shape.
+    Cells count the sessions logged that day, by `user_id` or by everyone; see
+    `_calendar_weeks` for the returned shape.
     """
     end = end or date_type.today()
     start = end - timedelta(days=days - 1)
 
     rows = (
-        db.session.query(WorkoutSession.date, db.func.count(WorkoutSession.id))
-        .filter(WorkoutSession.date >= start, WorkoutSession.date <= end)
+        _for_user(
+            db.session.query(
+                WorkoutSession.date, db.func.count(WorkoutSession.id)
+            ).filter(WorkoutSession.date >= start, WorkoutSession.date <= end),
+            user_id,
+        )
         .group_by(WorkoutSession.date)
         .all()
     )
     return _calendar_weeks({day: count for day, count in rows}, end, days)
 
 
-def workout_frequency() -> list[dict]:
+def workout_frequency(user_id: int | None = None) -> list[dict]:
     """How often each workout has been done and how it felt, most frequent first.
 
     Each row is {"name": str, "count": int, "feelings": {feeling: count}}, with
-    a `feelings` entry for every value in FEELINGS. Workouts never performed are
-    included with a count of 0.
+    a `feelings` entry for every value in FEELINGS.
+
+    Across everyone the table doubles as a list of what exists, so workouts
+    never performed are included with a count of 0. For a single user those
+    rows are just noise, so `user_id` lists only the workouts that user has
+    actually performed — an inner join rather than an outer one.
     """
-    rows = (
-        db.session.query(Workout.name, db.func.count(WorkoutSession.id))
-        .outerjoin(WorkoutSession)
-        .group_by(Workout.id)
-        .all()
-    )
-    by_feeling = (
-        db.session.query(
-            Workout.name, WorkoutSession.feeling, db.func.count(WorkoutSession.id)
+    on_workout = WorkoutSession.workout_id == Workout.id
+    query = db.session.query(Workout.name, db.func.count(WorkoutSession.id))
+    if user_id is None:
+        query = query.outerjoin(WorkoutSession, on_workout)
+    else:
+        query = query.join(WorkoutSession, on_workout).filter(
+            WorkoutSession.user_id == user_id
         )
-        .join(WorkoutSession, WorkoutSession.workout_id == Workout.id)
+    rows = query.group_by(Workout.id).all()
+    by_feeling = (
+        _for_user(
+            db.session.query(
+                Workout.name,
+                WorkoutSession.feeling,
+                db.func.count(WorkoutSession.id),
+            ).join(WorkoutSession, WorkoutSession.workout_id == Workout.id),
+            user_id,
+        )
         .group_by(Workout.name, WorkoutSession.feeling)
         .all()
     )
@@ -315,14 +393,24 @@ def workout_frequency() -> list[dict]:
     )
 
 
-def movement_repetitions(end: date_type | None = None) -> list[dict]:
+def movement_repetitions(
+    end: date_type | None = None, user_id: int | None = None
+) -> list[dict]:
     """Repetitions per movement across every workout, most repetitions first.
 
     Movements are grouped by name, so a movement that appears in several
     workouts — or that was done once as an extra — is reported as a single row
-    with its combined total. `workouts` lists the workouts the movement belongs
-    to and `extra` says whether it was ever logged as a session-only extra.
-    Movements never performed are included with a total of 0.
+    with its combined total.
+
+    `workouts` names where the repetitions came from: the workouts of the
+    sessions the movement was logged in, *not* every workout that has a movement
+    of that name. An extra belongs to no workout, so one done only as an extra
+    lists none, even when a workout the user never touched happens to contain a
+    movement with the same name. For a movement nobody has performed there are
+    no sessions to go on, so it falls back to the workouts it belongs to — the
+    only thing there is to say about it. `extra` says whether the movement was
+    ever logged as a session-only extra. Movements never performed are included
+    with a total of 0.
 
     `trend` says whether its repetitions are going up, down or holding steady;
     see `_repetition_trend`. It reads the movement's whole history, not just the
@@ -333,6 +421,14 @@ def movement_repetitions(end: date_type | None = None) -> list[dict]:
     cell counting repetitions instead of sessions, shaded relative to that
     movement's own busiest day. Repetitions are summed when a movement was done
     more than once on a date, which can happen across two sessions.
+
+    Filtering by `user_id` narrows the sessions counted *and* the movements
+    listed: a movement that user has never performed is dropped rather than
+    reported at 0, since the whole list would otherwise be padded with rows
+    from workouts they have never touched. Without a `user_id` those rows stay,
+    so the page doubles as a list of every movement that exists. A movement
+    logged with 0 repetitions still counts as performed — it was part of the
+    session — which is the same line the "Not performed yet" label draws.
     """
     end = end or date_type.today()
     buckets: dict[str, dict] = {}
@@ -352,23 +448,44 @@ def movement_repetitions(end: date_type | None = None) -> list[dict]:
         )
 
     # Movements that belong to a workout, whether or not they were ever done.
+    # Membership alone does not earn a workout a place in `workouts` — see the
+    # `performed_in` query below — but it is what gives a movement nobody has
+    # done a row at all.
+    member_of: dict[str, set[str]] = {}
     pairs = (
         db.session.query(Movement.name, Workout.name)
         .join(Workout, Movement.workout_id == Workout.id)
         .all()
     )
     for movement_name, workout_name in pairs:
-        workouts = bucket(movement_name)["workouts"]
-        if workout_name not in workouts:
-            workouts.append(workout_name)
+        bucket(movement_name)
+        member_of.setdefault(movement_name, set()).add(workout_name)
+
+    # The workouts a movement's repetitions actually came from, taken from the
+    # session each one was logged in. An extra contributes nothing here, which
+    # is what keeps a movement done only as an extra from being labelled with
+    # the workout that happens to have a movement of the same name.
+    performed_in: dict[str, set[str]] = {}
+    for movement_name, workout_name in _for_user(
+        db.session.query(Movement.name, Workout.name)
+        .join(SessionMovement, SessionMovement.movement_id == Movement.id)
+        .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id)
+        .join(Workout, Workout.id == WorkoutSession.workout_id),
+        user_id,
+    ).distinct():
+        performed_in.setdefault(movement_name, set()).add(workout_name)
 
     logged = (
-        db.session.query(
-            Movement.name,
-            db.func.sum(SessionMovement.repetitions),
-            db.func.count(SessionMovement.id),
+        _for_user(
+            db.session.query(
+                Movement.name,
+                db.func.sum(SessionMovement.repetitions),
+                db.func.count(SessionMovement.id),
+            )
+            .join(SessionMovement, SessionMovement.movement_id == Movement.id)
+            .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id),
+            user_id,
         )
-        .join(SessionMovement, SessionMovement.movement_id == Movement.id)
         .group_by(Movement.name)
         .all()
     )
@@ -379,12 +496,16 @@ def movement_repetitions(end: date_type | None = None) -> list[dict]:
 
     # Extras carry their own name instead of pointing at a movement row.
     extras = (
-        db.session.query(
-            SessionMovement.extra_name,
-            db.func.sum(SessionMovement.repetitions),
-            db.func.count(SessionMovement.id),
+        _for_user(
+            db.session.query(
+                SessionMovement.extra_name,
+                db.func.sum(SessionMovement.repetitions),
+                db.func.count(SessionMovement.id),
+            )
+            .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id)
+            .filter(SessionMovement.movement_id.is_(None)),
+            user_id,
         )
-        .filter(SessionMovement.movement_id.is_(None))
         .group_by(SessionMovement.extra_name)
         .all()
     )
@@ -397,24 +518,30 @@ def movement_repetitions(end: date_type | None = None) -> list[dict]:
     # Repetitions per date, so each movement can be drawn as a heatmap.
     per_date: dict[str, dict[date_type, int]] = {}
     linked_dates = (
-        db.session.query(
-            Movement.name,
-            WorkoutSession.date,
-            db.func.sum(SessionMovement.repetitions),
+        _for_user(
+            db.session.query(
+                Movement.name,
+                WorkoutSession.date,
+                db.func.sum(SessionMovement.repetitions),
+            )
+            .join(SessionMovement, SessionMovement.movement_id == Movement.id)
+            .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id),
+            user_id,
         )
-        .join(SessionMovement, SessionMovement.movement_id == Movement.id)
-        .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id)
         .group_by(Movement.name, WorkoutSession.date)
         .all()
     )
     extra_dates = (
-        db.session.query(
-            SessionMovement.extra_name,
-            WorkoutSession.date,
-            db.func.sum(SessionMovement.repetitions),
+        _for_user(
+            db.session.query(
+                SessionMovement.extra_name,
+                WorkoutSession.date,
+                db.func.sum(SessionMovement.repetitions),
+            )
+            .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id)
+            .filter(SessionMovement.movement_id.is_(None)),
+            user_id,
         )
-        .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id)
-        .filter(SessionMovement.movement_id.is_(None))
         .group_by(SessionMovement.extra_name, WorkoutSession.date)
         .all()
     )
@@ -427,12 +554,26 @@ def movement_repetitions(end: date_type | None = None) -> list[dict]:
         row["heatmap"] = _calendar_weeks(dates, end, MOVEMENT_HEATMAP_DAYS)
         row["trend"] = _repetition_trend(dates)
 
-    for row in buckets.values():
-        row["workouts"].sort()
-    return sorted(buckets.values(), key=lambda r: (-r["repetitions"], r["name"]))
+    for name, row in buckets.items():
+        # Where the repetitions came from, or — for a movement nobody has done
+        # — the workouts it is waiting in.
+        source = performed_in.get(name) if row["times"] else member_of.get(name)
+        row["workouts"] = sorted(source or ())
+
+    rows = list(buckets.values())
+    if user_id is not None:
+        # Every movement of every workout would otherwise show up on one
+        # person's page as a "Not performed yet" row. `times` is 0 for exactly
+        # those, and is what leaves `heatmap` None.
+        rows = [row for row in rows if row["times"]]
+    return sorted(rows, key=lambda r: (-r["repetitions"], r["name"]))
 
 
-def feeling_trend(end: date_type | None = None, days: int = TREND_DAYS) -> dict:
+def feeling_trend(
+    end: date_type | None = None,
+    days: int = TREND_DAYS,
+    user_id: int | None = None,
+) -> dict:
     """How the workouts of the last `days` days felt, one entry per day.
 
     Returns {"days": [...], "totals": {feeling: count}, "sessions": int,
@@ -448,12 +589,14 @@ def feeling_trend(end: date_type | None = None, days: int = TREND_DAYS) -> dict:
     start = end - timedelta(days=days - 1)
 
     rows = (
-        db.session.query(
-            WorkoutSession.date,
-            WorkoutSession.feeling,
-            db.func.count(WorkoutSession.id),
+        _for_user(
+            db.session.query(
+                WorkoutSession.date,
+                WorkoutSession.feeling,
+                db.func.count(WorkoutSession.id),
+            ).filter(WorkoutSession.date >= start, WorkoutSession.date <= end),
+            user_id,
         )
-        .filter(WorkoutSession.date >= start, WorkoutSession.date <= end)
         .group_by(WorkoutSession.date, WorkoutSession.feeling)
         .all()
     )
@@ -495,3 +638,43 @@ def feeling_trend(end: date_type | None = None, days: int = TREND_DAYS) -> dict:
         "start": start,
         "end": end,
     }
+
+
+def session_comments(user_id: int | None = None) -> list[dict]:
+    """The sessions that carry a free-text note, most recent first.
+
+    Each entry is {"date": date, "workout": str, "feeling": str, "user": str,
+    "comment": str}. Sessions without a comment are left out entirely, so this
+    is a log of what was written rather than of what was tracked. Two sessions
+    on one date are ordered newest-logged first, which the session id stands in
+    for. `user` is carried on every entry so the across-everyone view can say
+    who wrote the note; the per-user view already knows.
+    """
+    rows = (
+        _for_user(
+            db.session.query(
+                WorkoutSession.date,
+                Workout.name,
+                User.name,
+                WorkoutSession.feeling,
+                WorkoutSession.comment,
+                WorkoutSession.id,
+            )
+            .join(Workout, Workout.id == WorkoutSession.workout_id)
+            .join(User, User.id == WorkoutSession.user_id)
+            .filter(WorkoutSession.comment.isnot(None)),
+            user_id,
+        )
+        .order_by(WorkoutSession.date.desc(), WorkoutSession.id.desc())
+        .all()
+    )
+    return [
+        {
+            "date": day,
+            "workout": workout,
+            "user": user,
+            "feeling": feeling,
+            "comment": comment,
+        }
+        for day, workout, user, feeling, comment, _ in rows
+    ]

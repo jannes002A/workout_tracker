@@ -262,3 +262,48 @@ button.ghost:hover { border-style: solid; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* --- analytics: pick whose numbers to show --- */
+.user-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin: 1rem 0 0.75rem;
+}
+.user-filter label { margin-top: 0; }
+.user-filter select { width: auto; min-width: 12rem; }
+.user-filter button { margin-top: 0; padding: 0.5rem 1rem; }
+
+/* --- track: the session's free-text note --- */
+textarea {
+  font: inherit;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  width: 100%;
+  resize: vertical;
+}
+
+/* --- analytics: the comment log at the foot of the page --- */
+.comment-log { list-style: none; padding: 0; margin: 1rem 0 0; }
+.comment-log li {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-left: 6px solid var(--line);
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.5rem;
+}
+.comment-meta {
+  margin: 0 0 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+.comment-meta .swatch {
+  width: 11px; height: 11px; border-radius: 2px;
+  display: inline-block; margin-right: 0.3rem;
+}
+.comment-text { margin: 0; white-space: pre-wrap; }

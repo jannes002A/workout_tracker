@@ -17,10 +17,21 @@
 
 {% block content %}
 <h1>Track a session</h1>
-<p class="lede">Pick a workout you've created and record how many repetitions you did of each of its movements.</p>
+<p class="lede">Pick who trained and which workout they did, then record how many repetitions they did of each of its movements.</p>
 
-{% if workouts %}
+{% if not users %}
+  <p class="empty">You need a user first — <a href="{{ url_for('main.users') }}">add one</a>, then come back to track their sessions.</p>
+{% elif not workouts %}
+  <p class="empty">You need a workout first — <a href="{{ url_for('main.create') }}">create one</a>, then come back to track it.</p>
+{% else %}
 <form method="post" class="panel">
+  <label for="{{ user_field }}">Who did it?</label>
+  <select id="{{ user_field }}" name="{{ user_field }}" required>
+    {% for u in users %}
+      <option value="{{ u.id }}">{{ u.name }}</option>
+    {% endfor %}
+  </select>
+
   <label for="workout_id">Workout</label>
   <select id="workout_id" name="workout_id" required>
     {% for w in workouts %}
@@ -82,6 +93,13 @@
     {% endfor %}
   </div>
 
+  <label for="{{ comment_field }}">Comment</label>
+  <p class="hint">Anything worth remembering about this session. Optional — it shows up
+  at the bottom of the analytics page.</p>
+  <textarea id="{{ comment_field }}" name="{{ comment_field }}" rows="3"
+            maxlength="{{ max_comment_length }}"
+            placeholder="e.g. Felt strong on the last set, knee was fine."></textarea>
+
   <button type="submit">Log session</button>
 </form>
 
@@ -111,7 +129,5 @@ function addExtraMovement() {
   sync();
 })();
 </script>
-{% else %}
-  <p class="empty">You need a workout first — <a href="{{ url_for('main.create') }}">create one</a>, then come back to track it.</p>
 {% endif %}
 {% endblock %}

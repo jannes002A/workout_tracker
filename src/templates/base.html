@@ -12,6 +12,7 @@
   <header class="site-header">
     <span class="wordmark">Training Log</span>
     <nav>
+      <a href="{{ url_for('main.users') }}" {% if request.endpoint == 'main.users' %}class="active"{% endif %}>Users</a>
       <a href="{{ url_for('main.create') }}" {% if request.endpoint == 'main.create' %}class="active"{% endif %}>Create workout</a>
       <a href="{{ url_for('main.track') }}" {% if request.endpoint == 'main.track' %}class="active"{% endif %}>Track session</a>
       <a href="{{ url_for('main.analytics') }}" {% if request.endpoint == 'main.analytics' %}class="active"{% endif %}>Analytics</a>

@@ -6,15 +6,16 @@ from src import services
 
 
 @pytest.fixture()
-def seeded(app):
+def seeded(app, user):
     """Two workouts sharing the 'Squat' movement, with three sessions logged."""
     legs = services.create_workout("Leg day", ["Squat", "Lunge"])
     push = services.create_workout("Push day", ["Bench press", "Squat"])
     reps = {m.id: v for m, v in zip(legs.movements, (30, 20))}
-    services.log_session(legs.id, date(2026, 9, 1), 45, reps, "good")
-    services.log_session(legs.id, date(2026, 9, 3), 30, reps, "okay")
+    services.log_session(legs.id, user.id, date(2026, 9, 1), 45, reps, "good")
+    services.log_session(legs.id, user.id, date(2026, 9, 3), 30, reps, "okay")
     services.log_session(
         push.id,
+        user.id,
         date(2026, 9, 3),
         60,
         {m.id: v for m, v in zip(push.movements, (10, 5))},
@@ -167,10 +168,11 @@ def test_movement_repetitions_empty_db(app):
     assert services.movement_repetitions() == []
 
 
-def test_movement_repetitions_includes_extra_movements(app, seeded):
+def test_movement_repetitions_includes_extra_movements(app, seeded, user):
     legs = seeded["legs"]
     services.log_session(
         legs.id,
+        user.id,
         date(2026, 9, 5),
         45,
         {m.id: 10 for m in legs.movements},
@@ -184,11 +186,12 @@ def test_movement_repetitions_includes_extra_movements(app, seeded):
     assert pullup["extra"] is True
 
 
-def test_movement_repetitions_merges_extra_into_matching_movement(app, seeded):
+def test_movement_repetitions_merges_extra_into_matching_movement(app, seeded, user):
     """An extra with the name of a real movement adds to that movement's total."""
     push = seeded["push"]
     services.log_session(
         push.id,
+        user.id,
         date(2026, 9, 5),
         45,
         {m.id: 10 for m in push.movements},
@@ -202,11 +205,12 @@ def test_movement_repetitions_merges_extra_into_matching_movement(app, seeded):
     assert lunge["extra"] is True
 
 
-def test_movement_repetitions_extra_counts_towards_the_grand_total(app, seeded):
+def test_movement_repetitions_extra_counts_towards_the_grand_total(app, seeded, user):
     legs = seeded["legs"]
     before = sum(r["repetitions"] for r in services.movement_repetitions())
     services.log_session(
         legs.id,
+        user.id,
         date(2026, 9, 5),
         45,
         {m.id: 10 for m in legs.movements},
@@ -262,13 +266,14 @@ def test_movement_heatmap_levels_are_relative_to_that_movements_best_day(app, se
     assert cells(rows["Squat"])["2026-09-02"]["level"] == 0
 
 
-def test_movement_heatmap_sums_repetitions_done_twice_on_one_date(app):
+def test_movement_heatmap_sums_repetitions_done_twice_on_one_date(app, user):
     legs = services.create_workout("Leg day", ["Squat"])
     push = services.create_workout("Push day", ["Bench press"])
-    services.log_session(legs.id, date(2026, 9, 3), 45, {legs.movements[0].id: 25}, "good")
+    services.log_session(legs.id, user.id, date(2026, 9, 3), 45, {legs.movements[0].id: 25}, "good")
     # Squat again the same day, as an extra of another workout's session.
     services.log_session(
         push.id,
+        user.id,
         date(2026, 9, 3),
         30,
         {push.movements[0].id: 10},
@@ -283,10 +288,11 @@ def test_movement_heatmap_sums_repetitions_done_twice_on_one_date(app):
     assert squat["heatmap"]["max"] == 32
 
 
-def test_movement_heatmap_includes_extra_only_movements(app, seeded):
+def test_movement_heatmap_includes_extra_only_movements(app, seeded, user):
     legs = seeded["legs"]
     services.log_session(
         legs.id,
+        user.id,
         date(2026, 9, 6),
         45,
         {m.id: 10 for m in legs.movements},
@@ -328,7 +334,7 @@ def test_movement_never_performed_has_no_heatmap(app):
 
 
 @pytest.fixture()
-def weekly(app):
+def weekly(app, user):
     """One workout logged weekly for 10 weeks, with three shapes of history."""
     workout = services.create_workout("Test", ["Rising", "Falling", "Steady"])
     ids = {m.name: m.id for m in workout.movements}
@@ -336,6 +342,7 @@ def weekly(app):
     for week in range(10):
         services.log_session(
             workout.id,
+            user.id,
             start + timedelta(weeks=week),
             45,
             {
@@ -379,11 +386,11 @@ def test_trend_halves_account_for_every_repetition(app, weekly):
         assert row["trend"]["early"] + row["trend"]["late"] == row["repetitions"]
 
 
-def test_trend_change_is_the_fraction_the_later_half_differs_by(app):
+def test_trend_change_is_the_fraction_the_later_half_differs_by(app, user):
     workout = services.create_workout("Leg day", ["Squat"])
     movement_id = workout.movements[0].id
-    services.log_session(workout.id, date(2026, 9, 1), 45, {movement_id: 20}, "good")
-    services.log_session(workout.id, date(2026, 9, 3), 45, {movement_id: 30}, "good")
+    services.log_session(workout.id, user.id, date(2026, 9, 1), 45, {movement_id: 20}, "good")
+    services.log_session(workout.id, user.id, date(2026, 9, 3), 45, {movement_id: 30}, "good")
     trend = trend_of("Squat", end=date(2026, 9, 8))
     assert (trend["early"], trend["late"]) == (20, 30)
     assert trend["change"] == 0.5  # +50%
@@ -393,21 +400,23 @@ def test_trend_change_is_the_fraction_the_later_half_differs_by(app):
     "tolerance_case,expected",
     [(1.15, "similar"), (1.16, "up"), (0.85, "similar"), (0.84, "down")],
 )
-def test_trend_tolerance_boundary(app, tolerance_case, expected):
+def test_trend_tolerance_boundary(app, tolerance_case, expected, user):
     """±15% is still 'similar'; just past it becomes a direction."""
     workout = services.create_workout("Leg day", ["Squat"])
     movement_id = workout.movements[0].id
-    services.log_session(workout.id, date(2026, 9, 1), 45, {movement_id: 100}, "good")
+    services.log_session(workout.id, user.id, date(2026, 9, 1), 45, {movement_id: 100}, "good")
     services.log_session(
-        workout.id, date(2026, 9, 3), 45, {movement_id: round(100 * tolerance_case)}, "good"
+        workout.id,
+        user.id, date(2026, 9, 3), 45, {movement_id: round(100 * tolerance_case)}, "good"
     )
     assert trend_of("Squat", end=date(2026, 9, 8))["direction"] == expected
 
 
-def test_trend_is_unknown_for_a_single_date(app):
+def test_trend_is_unknown_for_a_single_date(app, user):
     workout = services.create_workout("Leg day", ["Squat"])
     services.log_session(
-        workout.id, date(2026, 9, 1), 45, {workout.movements[0].id: 30}, "good"
+        workout.id,
+        user.id, date(2026, 9, 1), 45, {workout.movements[0].id: 30}, "good"
     )
     trend = trend_of("Squat", end=date(2026, 9, 8))
     assert trend["direction"] is None
@@ -419,34 +428,35 @@ def test_trend_is_unknown_for_a_movement_never_performed(app):
     assert services.movement_repetitions()[0]["trend"]["direction"] is None
 
 
-def test_trend_is_up_with_no_earlier_baseline(app):
+def test_trend_is_up_with_no_earlier_baseline(app, user):
     """Nothing in the earlier half, something in the later one: up, but no %."""
     workout = services.create_workout("Leg day", ["Squat"])
     movement_id = workout.movements[0].id
-    services.log_session(workout.id, date(2026, 9, 1), 45, {movement_id: 0}, "good")
-    services.log_session(workout.id, date(2026, 9, 3), 45, {movement_id: 30}, "good")
+    services.log_session(workout.id, user.id, date(2026, 9, 1), 45, {movement_id: 0}, "good")
+    services.log_session(workout.id, user.id, date(2026, 9, 3), 45, {movement_id: 30}, "good")
     trend = trend_of("Squat", end=date(2026, 9, 8))
     assert trend["direction"] == "up"
     assert (trend["early"], trend["late"]) == (0, 30)
     assert trend["change"] is None
 
 
-def test_trend_of_extra_only_movement(app):
+def test_trend_of_extra_only_movement(app, user):
     workout = services.create_workout("Leg day", ["Squat"])
     for day, reps in ((date(2026, 9, 1), 5), (date(2026, 9, 5), 20)):
         services.log_session(
-            workout.id, day, 45, {workout.movements[0].id: 10}, "good",
+            workout.id,
+            user.id, day, 45, {workout.movements[0].id: 10}, "good",
             extra_movements=[("Pull-up", reps)],
         )
     assert trend_of("Pull-up", end=date(2026, 9, 8))["direction"] == "up"
 
 
-def test_trend_reads_the_whole_history_not_just_the_heatmap_window(app):
+def test_trend_reads_the_whole_history_not_just_the_heatmap_window(app, user):
     """Sessions older than the heatmap window still shape the trend."""
     workout = services.create_workout("Leg day", ["Squat"])
     movement_id = workout.movements[0].id
-    services.log_session(workout.id, date(2020, 1, 1), 45, {movement_id: 100}, "good")
-    services.log_session(workout.id, date(2026, 9, 1), 45, {movement_id: 10}, "good")
+    services.log_session(workout.id, user.id, date(2020, 1, 1), 45, {movement_id: 100}, "good")
+    services.log_session(workout.id, user.id, date(2026, 9, 1), 45, {movement_id: 10}, "good")
     row = next(
         r for r in services.movement_repetitions(end=date(2026, 9, 8))
         if r["name"] == "Squat"
@@ -506,3 +516,336 @@ def test_feeling_trend_empty_db(app):
     assert trend["sessions"] == 0
     assert trend["totals"] == {"good": 0, "okay": 0, "bad": 0}
     assert len(trend["days"]) == services.TREND_DAYS
+
+
+# -------------------------------------------------- analytics for one user
+
+
+@pytest.fixture()
+def two_users(app, user, other_user):
+    """One shared workout, done by both users, plus an extra for each.
+
+    Alex trains on 1 and 3 September, Sam only on 2 September, so every
+    section can be checked against a clean split.
+    """
+    legs = services.create_workout("Leg day", ["Squat", "Lunge"])
+    services.create_workout("Push day", ["Bench press"])  # nobody has done it
+    reps = {m.id: v for m, v in zip(legs.movements, (30, 20))}
+    services.log_session(
+        legs.id, user.id, date(2026, 9, 1), 45, reps, "good",
+        extra_movements=[("Pull-up", 12)],
+    )
+    services.log_session(legs.id, user.id, date(2026, 9, 3), 45, reps, "good")
+    services.log_session(
+        legs.id, other_user.id, date(2026, 9, 2), 45,
+        {m.id: v for m, v in zip(legs.movements, (5, 5))}, "bad",
+        extra_movements=[("Dip", 8)],
+    )
+    return {"legs": legs}
+
+
+def test_activity_map_for_one_user(app, two_users, user, other_user):
+    end = date(2026, 9, 8)
+    mine = services.activity_map(end=end, days=30, user_id=user.id)
+    by_date = {c["date"]: c["count"] for week in mine["weeks"] for c in week if c}
+    assert by_date["2026-09-01"] == 1
+    assert by_date["2026-09-02"] == 0  # that one is Sam's
+    assert by_date["2026-09-03"] == 1
+
+    theirs = services.activity_map(end=end, days=30, user_id=other_user.id)
+    counts = {c["date"]: c["count"] for week in theirs["weeks"] for c in week if c}
+    assert counts["2026-09-02"] == 1
+    assert counts["2026-09-01"] == 0
+
+
+def test_activity_map_without_a_user_covers_everyone(app, two_users):
+    data = services.activity_map(end=date(2026, 9, 8), days=30)
+    total = sum(c["count"] for week in data["weeks"] for c in week if c)
+    assert total == 3
+
+
+def test_activity_map_for_an_unknown_user_is_empty(app, two_users):
+    data = services.activity_map(end=date(2026, 9, 8), days=30, user_id=999)
+    assert data["max"] == 0
+
+
+def test_workout_frequency_for_one_user(app, two_users, user, other_user):
+    rows = {r["name"]: r for r in services.workout_frequency(user_id=user.id)}
+    assert rows["Leg day"]["count"] == 2
+    assert rows["Leg day"]["feelings"] == {"good": 2, "okay": 0, "bad": 0}
+
+    theirs = {r["name"]: r for r in services.workout_frequency(user_id=other_user.id)}
+    assert theirs["Leg day"]["count"] == 1
+    assert theirs["Leg day"]["feelings"] == {"good": 0, "okay": 0, "bad": 1}
+
+
+def test_workout_frequency_for_one_user_lists_only_what_they_performed(
+    app, two_users, user
+):
+    """'Push day' exists but nobody has done it; 'Core day' likewise."""
+    services.create_workout("Core day", ["Plank"])
+    assert [r["name"] for r in services.workout_frequency(user_id=user.id)] == ["Leg day"]
+    # across everyone the table still doubles as a list of what exists
+    assert sorted(r["name"] for r in services.workout_frequency()) == [
+        "Core day",
+        "Leg day",
+        "Push day",
+    ]
+
+
+def test_workout_frequency_for_a_user_with_no_sessions_is_empty(app, two_users):
+    stranger = services.create_user("Nobody", 20)
+    assert services.workout_frequency(user_id=stranger.id) == []
+
+
+def test_workout_frequency_drops_a_workout_only_another_user_did(app, two_users, user):
+    """Alex never touched 'Push day', and Sam doing it would not change that."""
+    push = next(w for w in services.get_all_workouts() if w.name == "Push day")
+    sam = services.get_all_users()[-1]
+    services.log_session(
+        push.id, sam.id, date(2026, 9, 2), 45, {push.movements[0].id: 10}, "good"
+    )
+    assert [r["name"] for r in services.workout_frequency(user_id=user.id)] == ["Leg day"]
+    assert [r["name"] for r in services.workout_frequency(user_id=sam.id)] == [
+        "Leg day",
+        "Push day",
+    ]
+
+
+def test_feeling_trend_for_one_user(app, two_users, user, other_user):
+    mine = services.feeling_trend(end=date(2026, 9, 3), days=3, user_id=user.id)
+    assert mine["totals"] == {"good": 2, "okay": 0, "bad": 0}
+    assert [d["sessions"] for d in mine["days"]] == [1, 0, 1]
+
+    theirs = services.feeling_trend(
+        end=date(2026, 9, 3), days=3, user_id=other_user.id
+    )
+    assert theirs["totals"] == {"good": 0, "okay": 0, "bad": 1}
+    assert [d["sessions"] for d in theirs["days"]] == [0, 1, 0]
+
+
+def test_movement_repetitions_for_one_user(app, two_users, user):
+    rows = {r["name"]: r for r in services.movement_repetitions(
+        end=date(2026, 9, 8), user_id=user.id
+    )}
+    assert rows["Squat"]["repetitions"] == 60  # 30 + 30, not Sam's 5
+    assert rows["Squat"]["times"] == 2
+    assert rows["Pull-up"]["repetitions"] == 12
+    assert "Dip" not in rows  # Sam's extra, and not a movement of any workout
+
+
+def test_movement_repetitions_drops_movements_a_user_never_did(app, two_users, other_user):
+    """Sam did Leg day only, so Push day's 'Bench press' is not their business."""
+    rows = {r["name"]: r for r in services.movement_repetitions(
+        end=date(2026, 9, 8), user_id=other_user.id
+    )}
+    assert sorted(rows) == ["Dip", "Lunge", "Squat"]
+    assert "Bench press" not in rows  # never performed by anyone
+    assert "Pull-up" not in rows  # Alex's extra, not Sam's
+
+    # without a user those rows stay, so the page lists every movement there is
+    everyone = {r["name"] for r in services.movement_repetitions(end=date(2026, 9, 8))}
+    assert everyone == {"Bench press", "Dip", "Lunge", "Pull-up", "Squat"}
+
+
+def test_movement_repetitions_keeps_a_movement_performed_for_zero_reps(app, user):
+    """0 repetitions records a movement that was in the session but not done."""
+    workout = services.create_workout("Leg day", ["Squat", "Lunge"])
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45,
+        {m.id: v for m, v in zip(workout.movements, (30, 0))}, "good",
+    )
+    rows = {r["name"]: r for r in services.movement_repetitions(
+        end=date(2026, 9, 8), user_id=user.id
+    )}
+    assert rows["Lunge"]["repetitions"] == 0
+    assert rows["Lunge"]["times"] == 1
+    assert rows["Lunge"]["heatmap"] is not None
+
+
+def test_movement_repetitions_for_a_user_with_no_sessions_is_empty(app, two_users):
+    stranger = services.create_user("Nobody", 20)
+    assert services.movement_repetitions(
+        end=date(2026, 9, 8), user_id=stranger.id
+    ) == []
+
+
+def test_movement_heatmap_and_trend_are_per_user(app, two_users, user, other_user):
+    end = date(2026, 9, 8)
+    mine = {r["name"]: r for r in services.movement_repetitions(end=end, user_id=user.id)}
+    days = {c["date"]: c["count"] for week in mine["Squat"]["heatmap"]["weeks"]
+            for c in week if c}
+    assert days["2026-09-01"] == 30
+    assert days["2026-09-02"] == 0  # Sam's session leaves no mark on Alex's grid
+    assert mine["Squat"]["heatmap"]["max"] == 30
+    # one date each side of the split, same count: holding steady
+    assert mine["Squat"]["trend"]["direction"] == "similar"
+
+    theirs = {r["name"]: r for r in services.movement_repetitions(
+        end=end, user_id=other_user.id
+    )}
+    assert theirs["Squat"]["heatmap"]["max"] == 5
+    assert theirs["Squat"]["trend"]["direction"] is None  # a single date
+
+
+def test_movement_repetitions_without_a_user_covers_everyone(app, two_users):
+    rows = {r["name"]: r for r in services.movement_repetitions(end=date(2026, 9, 8))}
+    assert rows["Squat"]["repetitions"] == 65  # 30 + 30 + 5
+    assert rows["Dip"]["repetitions"] == 8
+    assert rows["Pull-up"]["repetitions"] == 12
+
+
+# ------------------------------------------------------------ session_comments
+
+
+@pytest.fixture()
+def commented(app, user, other_user):
+    """Three commented sessions across two users, plus one with no comment."""
+    legs = services.create_workout("Leg day", ["Squat"])
+    push = services.create_workout("Push day", ["Bench press"])
+    squat, bench = legs.movements[0].id, push.movements[0].id
+    services.log_session(
+        legs.id, user.id, date(2026, 9, 1), 45, {squat: 30}, "good",
+        comment="Felt strong.",
+    )
+    services.log_session(
+        legs.id, other_user.id, date(2026, 9, 3), 45, {squat: 10}, "okay",
+        comment="First time back.",
+    )
+    services.log_session(
+        push.id, user.id, date(2026, 9, 5), 45, {bench: 20}, "bad",
+        comment="Shoulder twinge.",
+    )
+    services.log_session(legs.id, user.id, date(2026, 9, 7), 45, {squat: 25}, "good")
+    return {"legs": legs, "push": push}
+
+
+def test_session_comments_empty_db(app):
+    assert services.session_comments() == []
+
+
+def test_session_comments_newest_first(app, commented):
+    assert [c["date"] for c in services.session_comments()] == [
+        date(2026, 9, 5),
+        date(2026, 9, 3),
+        date(2026, 9, 1),
+    ]
+
+
+def test_session_comments_carry_the_date_workout_feeling_and_user(app, commented):
+    assert services.session_comments()[0] == {
+        "date": date(2026, 9, 5),
+        "workout": "Push day",
+        "user": "Alex",
+        "feeling": "bad",
+        "comment": "Shoulder twinge.",
+    }
+
+
+def test_session_comments_skips_sessions_without_one(app, commented):
+    """The 7 September session was tracked but nothing was written about it."""
+    assert len(services.session_comments()) == 3
+    assert date(2026, 9, 7) not in [c["date"] for c in services.session_comments()]
+
+
+def test_session_comments_for_one_user(app, commented, user, other_user):
+    mine = services.session_comments(user_id=user.id)
+    assert [c["comment"] for c in mine] == ["Shoulder twinge.", "Felt strong."]
+    theirs = services.session_comments(user_id=other_user.id)
+    assert [c["comment"] for c in theirs] == ["First time back."]
+
+
+def test_session_comments_for_a_user_with_none_is_empty(app, commented):
+    stranger = services.create_user("Nobody", 20)
+    assert services.session_comments(user_id=stranger.id) == []
+
+
+def test_session_comments_orders_same_day_sessions_newest_logged_first(app, user):
+    workout = services.create_workout("Leg day", ["Squat"])
+    squat = workout.movements[0].id
+    for note in ("Morning.", "Evening."):
+        services.log_session(
+            workout.id, user.id, date(2026, 9, 1), 45, {squat: 10}, "good",
+            comment=note,
+        )
+    assert [c["comment"] for c in services.session_comments()] == [
+        "Evening.",
+        "Morning.",
+    ]
+
+
+# ------------------- where a movement's repetitions are said to come from
+
+
+def test_extra_is_not_attributed_to_a_workout_of_the_same_name(app, user):
+    """An extra named after another workout's movement is still just an extra.
+
+    Doing 'Squats' as an extra during Arm day must not make it look like Leg
+    day was performed — nothing of Leg day was.
+    """
+    legs = services.create_workout("Leg day", ["Squats", "Lunges"])
+    arms = services.create_workout("Arm day", ["Push ups"])
+    services.log_session(
+        arms.id, user.id, date(2026, 9, 9), 45, {arms.movements[0].id: 10}, "good",
+        extra_movements=[("Squats", 20)],
+    )
+    rows = {r["name"]: r for r in services.movement_repetitions(end=date(2026, 9, 9))}
+    assert rows["Squats"]["workouts"] == []
+    assert rows["Squats"]["extra"] is True
+    assert rows["Squats"]["repetitions"] == 20
+    # the untouched Leg day movement keeps its label: it is all there is to say
+    assert rows["Lunges"]["workouts"] == ["Leg day"]
+    assert rows["Lunges"]["times"] == 0
+    assert legs.name == "Leg day"  # and Leg day itself was never performed
+    assert [r["name"] for r in services.workout_frequency(user_id=user.id)] == ["Arm day"]
+
+
+def test_workouts_label_lists_only_where_a_movement_was_performed(app, user):
+    """'Squat' is in both workouts but has only ever been done in Leg day."""
+    legs = services.create_workout("Leg day", ["Squat"])
+    push = services.create_workout("Push day", ["Squat", "Bench press"])
+    services.log_session(
+        legs.id, user.id, date(2026, 9, 1), 45, {legs.movements[0].id: 30}, "good"
+    )
+    rows = {r["name"]: r for r in services.movement_repetitions(end=date(2026, 9, 1))}
+    assert rows["Squat"]["workouts"] == ["Leg day"]
+    assert push.name == "Push day"  # still exists, just never performed
+    assert rows["Bench press"]["workouts"] == ["Push day"]  # never done: membership
+
+
+def test_workouts_label_is_per_user(app, user, other_user):
+    """Alex did Leg day, Sam did Push day; the shared movement says so."""
+    legs = services.create_workout("Leg day", ["Squat"])
+    push = services.create_workout("Push day", ["Squat"])
+    services.log_session(
+        legs.id, user.id, date(2026, 9, 1), 45, {legs.movements[0].id: 30}, "good"
+    )
+    services.log_session(
+        push.id, other_user.id, date(2026, 9, 2), 45, {push.movements[0].id: 20}, "good"
+    )
+    end = date(2026, 9, 8)
+    mine = {r["name"]: r for r in services.movement_repetitions(end=end, user_id=user.id)}
+    theirs = {r["name"]: r for r in services.movement_repetitions(
+        end=end, user_id=other_user.id
+    )}
+    everyone = {r["name"]: r for r in services.movement_repetitions(end=end)}
+    assert mine["Squat"]["workouts"] == ["Leg day"]
+    assert theirs["Squat"]["workouts"] == ["Push day"]
+    assert everyone["Squat"]["workouts"] == ["Leg day", "Push day"]
+
+
+def test_a_movement_done_both_ways_keeps_the_workout_it_was_performed_in(app, user):
+    """Lunge is done inside Leg day and again as an extra during Push day."""
+    legs = services.create_workout("Leg day", ["Lunge"])
+    push = services.create_workout("Push day", ["Bench press"])
+    services.log_session(
+        legs.id, user.id, date(2026, 9, 1), 45, {legs.movements[0].id: 20}, "good"
+    )
+    services.log_session(
+        push.id, user.id, date(2026, 9, 2), 45, {push.movements[0].id: 10}, "good",
+        extra_movements=[("Lunge", 7)],
+    )
+    rows = {r["name"]: r for r in services.movement_repetitions(end=date(2026, 9, 8))}
+    assert rows["Lunge"]["workouts"] == ["Leg day"]  # not Push day
+    assert rows["Lunge"]["extra"] is True
+    assert rows["Lunge"]["repetitions"] == 27

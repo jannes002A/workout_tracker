@@ -10,6 +10,20 @@ FEELINGS = ("good", "okay", "bad")
 FEELING_SCORES = {"bad": 1, "okay": 2, "good": 3}
 
 
+class User(db.Model):
+    """A person whose sessions are tracked. Workouts themselves are shared."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), unique=True, nullable=False)
+    age = db.Column(db.Integer, nullable=False)
+    sessions = db.relationship(
+        "WorkoutSession", backref="user", cascade="all, delete-orphan", lazy=True
+    )
+
+    def __repr__(self) -> str:
+        return f"<User {self.name}>"
+
+
 class Workout(db.Model):
     """A workout template, e.g. 'Leg day', made up of movements."""
 
@@ -41,13 +55,15 @@ class Movement(db.Model):
 
 
 class WorkoutSession(db.Model):
-    """One performed instance of a workout (tracked on the Track page)."""
+    """One performed instance of a workout, by one user (tracked on /track)."""
 
     id = db.Column(db.Integer, primary_key=True)
     workout_id = db.Column(db.Integer, db.ForeignKey("workout.id"), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     date = db.Column(db.Date, nullable=False, default=date_type.today)
     duration_minutes = db.Column(db.Integer, nullable=False)  # 10-90
     feeling = db.Column(db.String(10), nullable=False)  # good / okay / bad
+    comment = db.Column(db.Text)  # free text, NULL when the field was left blank
     logs = db.relationship(
         "SessionMovement", backref="session", cascade="all, delete-orphan", lazy=True
     )
@@ -58,7 +74,10 @@ class WorkoutSession(db.Model):
         return sum(log.repetitions for log in self.logs)
 
     def __repr__(self) -> str:
-        return f"<WorkoutSession workout={self.workout_id} date={self.date}>"
+        return (
+            f"<WorkoutSession workout={self.workout_id} "
+            f"user={self.user_id} date={self.date}>"
+        )
 
 
 class SessionMovement(db.Model):

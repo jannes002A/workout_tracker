@@ -1,6 +1,6 @@
 import pytest
 
-from src import create_app
+from src import create_app, services
 from src.models import db
 
 
@@ -17,6 +17,18 @@ def app():
         yield app
         db.session.remove()
         db.drop_all()
+
+
+@pytest.fixture()
+def user(app):
+    """The default person sessions are logged against."""
+    return services.create_user("Alex", 34)
+
+
+@pytest.fixture()
+def other_user(app):
+    """A second person, for the tests that check the analytics are separated."""
+    return services.create_user("Sam", 41)
 
 
 @pytest.fixture()
