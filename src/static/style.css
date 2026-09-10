@@ -91,10 +91,10 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
   outline-offset: 1px;
 }
 
-#movement-list { display: flex; flex-direction: column; gap: 0.5rem; }
+#exercise-list { display: flex; flex-direction: column; gap: 0.5rem; }
 
 .picker-label { font-weight: 700; font-size: 0.9rem; margin: 1rem 0 0.5rem; }
-.movement-picker { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.exercise-picker { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .chip {
   margin-top: 0;
   align-self: auto;
@@ -156,8 +156,8 @@ button.ghost:hover { border-style: solid; }
 
 .empty { color: var(--ink-soft); }
 
-/* --- track: one repetition field per movement --- */
-.movement-reps {
+/* --- track: one repetition field per exercise --- */
+.exercise-reps {
   border: 1px solid var(--line);
   border-radius: 4px;
   margin: 0.75rem 0 0;
@@ -167,27 +167,36 @@ button.ghost:hover { border-style: solid; }
   gap: 0.35rem;
   min-width: 0;
 }
-.movement-reps legend { font-weight: 700; font-size: 0.9rem; padding: 0 0.35rem; }
-.movement-row {
+.exercise-reps legend { font-weight: 700; font-size: 0.9rem; padding: 0 0.35rem; }
+.exercise-row {
   display: grid;
-  grid-template-columns: 1fr 7rem;
+  grid-template-columns: 1fr 7rem 7rem;
   align-items: center;
   gap: 0.75rem;
 }
-.movement-row label { margin-top: 0; font-weight: 400; }
+.exercise-row label { margin-top: 0; font-weight: 400; }
 
-.extra-movements {
+/* The "reps" / "extra kg" headings above the dropdown columns, sharing the
+   row's own grid so they stay over the right column. */
+.column-heads {
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  text-transform: lowercase;
+  margin-bottom: 0.25rem;
+}
+
+.extra-exercises {
   border: 1px dashed var(--ink-soft);
   border-radius: 4px;
   margin: 0.75rem 0 0;
   padding: 0.25rem 1rem 1rem;
   min-width: 0;
 }
-.extra-movements legend { font-weight: 700; font-size: 0.9rem; padding: 0 0.35rem; }
-.extra-movements .hint { color: var(--ink-soft); font-size: 0.85rem; margin: 0.35rem 0 0.75rem; max-width: 55ch; }
-.extra-movements button { margin-top: 0.75rem; }
+.extra-exercises legend { font-weight: 700; font-size: 0.9rem; padding: 0 0.35rem; }
+.extra-exercises .hint { color: var(--ink-soft); font-size: 0.85rem; margin: 0.35rem 0 0.75rem; max-width: 55ch; }
+.extra-exercises button { margin-top: 0.75rem; }
 #extra-list { display: flex; flex-direction: column; gap: 0.5rem; }
-.extra-row { display: grid; grid-template-columns: 1fr 7rem auto; align-items: center; gap: 0.75rem; }
+.extra-row { display: grid; grid-template-columns: 1fr 7rem 7rem auto; align-items: center; gap: 0.75rem; }
 .extra-row button { margin-top: 0; padding: 0.45rem 0.8rem; font-size: 0.85rem; }
 
 /* --- analytics --- */
@@ -222,6 +231,7 @@ button.ghost:hover { border-style: solid; }
 .freq-table th { border-bottom: 2px solid var(--ink); }
 .freq-table .muted { color: var(--ink-soft); }
 
+.stat-row { display: flex; flex-wrap: wrap; gap: 0.5rem 2.5rem; align-items: baseline; }
 .big-stat { font-size: 2.6rem; font-weight: 800; font-stretch: 70%; margin: 0.75rem 0; }
 .big-stat span { font-size: 1rem; font-weight: 400; font-stretch: 100%; color: var(--ink-soft); }
 
@@ -235,8 +245,8 @@ button.ghost:hover { border-style: solid; }
 .feeling-chart .bar-bad { fill: var(--feel-bad); }
 .feeling-chart .bar-rest { fill: var(--feel-rest); }
 
-.movement-block { margin-top: 1.75rem; }
-.movement-block h3 { font-stretch: 85%; font-weight: 700; margin: 0 0 0.15rem; }
+.exercise-block { margin-top: 1.75rem; }
+.exercise-block h3 { font-stretch: 85%; font-weight: 700; margin: 0 0 0.15rem; }
 .chart-caption { color: var(--ink-soft); font-size: 0.85rem; margin: 0; }
 
 .trend {

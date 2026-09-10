@@ -1,15 +1,27 @@
 {% extends "base.html" %}
 {% block title %}Track session · Training Log{% endblock %}
 
+{# The weight dropdown, rendered next to every repetition dropdown. The
+   options come from the same list the service validates against, and the
+   first one — the lowest weight — is the default. #}
+{% macro weight_select(name, label, id=none) %}
+  <select {% if id %}id="{{ id }}" {% endif %}name="{{ name }}" aria-label="{{ label }}">
+    {% for w in weights %}
+      <option value="{{ w }}" {% if loop.first %}selected{% endif %}>{{ w }}</option>
+    {% endfor %}
+  </select>
+{% endmacro %}
+
 {% macro extra_row() %}
   <div class="extra-row">
     <input name="{{ extra_name_field }}" type="text" placeholder="e.g. Pull-up"
-           aria-label="Extra movement">
+           aria-label="Extra exercise">
     <select name="{{ extra_reps_field }}" aria-label="Repetitions">
       {% for r in repetitions %}
         <option value="{{ r }}" {% if r == 10 %}selected{% endif %}>{{ r }}</option>
       {% endfor %}
     </select>
+    {{ weight_select(extra_weight_field, "Extra weight in " ~ weight_unit) }}
     <button type="button" class="ghost"
             onclick="this.closest('.extra-row').remove()">Remove</button>
   </div>
@@ -17,7 +29,7 @@
 
 {% block content %}
 <h1>Track a session</h1>
-<p class="lede">Pick who trained and which workout they did, then record how many repetitions they did of each of its movements.</p>
+<p class="lede">Pick who trained and which workout they did, then record how many repetitions they did of each of its exercises, and how much extra weight they carried ({{ weight_unit }}) — leave it at {{ weights[0] }} for bodyweight.</p>
 
 {% if not users %}
   <p class="empty">You need a user first — <a href="{{ url_for('main.users') }}">add one</a>, then come back to track their sessions.</p>
@@ -59,27 +71,38 @@
   </div>
 
   {% for w in workouts %}
-    <fieldset class="movement-reps" data-workout="{{ w.id }}">
+    <fieldset class="exercise-reps" data-workout="{{ w.id }}">
       <legend>Repetitions — {{ w.name }}</legend>
-      {% for m in w.movements %}
-        <div class="movement-row">
+      <div class="exercise-row column-heads" aria-hidden="true">
+        <span></span><span>reps</span><span>extra {{ weight_unit }}</span>
+      </div>
+      {% for m in w.exercises %}
+        <div class="exercise-row">
           <label for="{{ reps_prefix }}{{ m.id }}">{{ m.name }}</label>
           <select id="{{ reps_prefix }}{{ m.id }}" name="{{ reps_prefix }}{{ m.id }}">
             {% for r in repetitions %}
               <option value="{{ r }}" {% if r == 10 %}selected{% endif %}>{{ r }}</option>
             {% endfor %}
           </select>
+          {{ weight_select(
+               weight_prefix ~ m.id,
+               "Extra weight for " ~ m.name ~ " in " ~ weight_unit,
+               id=weight_prefix ~ m.id) }}
         </div>
       {% endfor %}
     </fieldset>
   {% endfor %}
 
-  <fieldset class="extra-movements">
-    <legend>Extra movements — this session only</legend>
+  <fieldset class="extra-exercises">
+    <legend>Extra exercises — this session only</legend>
     <p class="hint">Did something that isn't part of the workout? Add it here with its
-    repetitions. It counts towards your analytics but is not added to the workout.</p>
+    repetitions and extra weight. It counts towards your analytics but is not added to
+    the workout.</p>
+    <div class="extra-row column-heads" aria-hidden="true">
+      <span>exercise</span><span>reps</span><span>extra {{ weight_unit }}</span><span></span>
+    </div>
     <div id="extra-list">{{ extra_row() }}</div>
-    <button type="button" class="ghost" onclick="addExtraMovement()">Add another movement</button>
+    <button type="button" class="ghost" onclick="addExtraExercise()">Add another exercise</button>
   </fieldset>
   <template id="extra-row-template">{{ extra_row() }}</template>
 
@@ -104,7 +127,7 @@
 </form>
 
 <script>
-function addExtraMovement() {
+function addExtraExercise() {
   const template = document.getElementById('extra-row-template');
   const row = template.content.cloneNode(true);
   const list = document.getElementById('extra-list');
@@ -112,12 +135,12 @@ function addExtraMovement() {
   list.lastElementChild.querySelector('input').focus();
 }
 
-// Show only the movements of the selected workout. Disabling a fieldset keeps
+// Show only the exercises of the selected workout. Disabling a fieldset keeps
 // the other workouts' repetition fields out of the submission; without JS every
-// fieldset stays visible and the server ignores the irrelevant movements.
+// fieldset stays visible and the server ignores the irrelevant exercises.
 (function () {
   const select = document.getElementById('workout_id');
-  const groups = Array.from(document.querySelectorAll('.movement-reps'));
+  const groups = Array.from(document.querySelectorAll('.exercise-reps'));
   function sync() {
     for (const group of groups) {
       const active = group.dataset.workout === select.value;

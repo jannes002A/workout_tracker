@@ -11,8 +11,8 @@ from datetime import timedelta
 from src.models import (
     FEELING_SCORES,
     FEELINGS,
-    Movement,
-    SessionMovement,
+    Exercise,
+    SessionExercise,
     User,
     Workout,
     WorkoutSession,
@@ -21,9 +21,13 @@ from src.models import (
 
 DURATION_CHOICES = list(range(10, 91, 5))  # 10-90 minutes
 REPETITION_CHOICES = list(range(0, 121))  # 0-120, 0 meaning skipped
+WEIGHT_CHOICES = list(range(1, 201))  # 1-200, the extra weight per exercise
+DEFAULT_WEIGHT = WEIGHT_CHOICES[0]  # what an unanswered weight field means: 1
+WEIGHT_UNIT = "kg"  # only ever displayed; nothing converts between units
 TREND_DAYS = 30  # window of the feeling graph on the analytics page
-MOVEMENT_HEATMAP_DAYS = 365  # window of each per-movement heatmap
+EXERCISE_HEATMAP_DAYS = 365  # window of each per-exercise heatmap
 REPETITION_TREND_TOLERANCE = 0.15  # within ±15% counts as holding steady
+COMMENT_LIMIT = 5  # how many session notes the analytics page lists
 MIN_AGE, MAX_AGE = 1, 120  # bounds of the age field, and of its error message
 MAX_COMMENT_LENGTH = 2000  # cap on a session's free-text note
 
@@ -66,25 +70,25 @@ def get_user(user_id: int | None) -> User | None:
 # ---------------------------------------------------------------- workouts
 
 
-def create_workout(name: str, movement_names: list[str]) -> Workout:
-    """Create a workout with its movements. Empty movement names are dropped."""
+def create_workout(name: str, exercise_names: list[str]) -> Workout:
+    """Create a workout with its exercises. Empty exercise names are dropped."""
     name = (name or "").strip()
-    movements, seen = [], set()
-    for raw in movement_names:
-        movement = (raw or "").strip()
-        if not movement or movement.casefold() in seen:
-            continue  # blank field, or the same movement picked twice
-        seen.add(movement.casefold())
-        movements.append(movement)
+    exercises, seen = [], set()
+    for raw in exercise_names:
+        exercise = (raw or "").strip()
+        if not exercise or exercise.casefold() in seen:
+            continue  # blank field, or the same exercise picked twice
+        seen.add(exercise.casefold())
+        exercises.append(exercise)
     if not name:
         raise ValidationError("Workout name is required.")
-    if not movements:
-        raise ValidationError("Add at least one movement.")
+    if not exercises:
+        raise ValidationError("Add at least one exercise.")
     if Workout.query.filter_by(name=name).first():
         raise ValidationError(f"A workout named '{name}' already exists.")
 
     workout = Workout(name=name)
-    workout.movements = [Movement(name=m) for m in movements]
+    workout.exercises = [Exercise(name=m) for m in exercises]
     db.session.add(workout)
     db.session.commit()
     return workout
@@ -95,16 +99,16 @@ def get_all_workouts() -> list[Workout]:
     return Workout.query.order_by(Workout.name).all()
 
 
-def known_movement_names() -> list[str]:
-    """Every movement name already in the log, sorted case-insensitively.
+def known_exercise_names() -> list[str]:
+    """Every exercise name already in the log, sorted case-insensitively.
 
-    Covers the movements of existing workouts as well as extras logged on the
+    Covers the exercises of existing workouts as well as extras logged on the
     track page, so the create page can offer any of them for reuse.
     """
-    names = {name for (name,) in db.session.query(Movement.name).distinct()}
+    names = {name for (name,) in db.session.query(Exercise.name).distinct()}
     extras = (
-        db.session.query(SessionMovement.extra_name)
-        .filter(SessionMovement.movement_id.is_(None))
+        db.session.query(SessionExercise.extra_name)
+        .filter(SessionExercise.exercise_id.is_(None))
         .distinct()
     )
     names |= {name for (name,) in extras if name}
@@ -114,26 +118,47 @@ def known_movement_names() -> list[str]:
 # ---------------------------------------------------------------- sessions
 
 
+def _check_weight(weight: int, exercise_name: str) -> None:
+    """Reject an extra weight outside WEIGHT_CHOICES, naming the exercise.
+
+    The message is built from the ends of the list, the same one the track
+    page's dropdown is filled from, so the two cannot drift apart.
+    """
+    if weight not in WEIGHT_CHOICES:
+        raise ValidationError(
+            f"Weight for '{exercise_name}' must be between "
+            f"{WEIGHT_CHOICES[0]} and {WEIGHT_CHOICES[-1]}."
+        )
+
+
 def log_session(
     workout_id: int,
     user_id: int,
     session_date: date_type,
     duration_minutes: int,
-    repetitions_by_movement: dict[int, int],
+    repetitions_by_exercise: dict[int, int],
     feeling: str,
-    extra_movements: list[tuple[str, int]] | None = None,
+    extra_exercises: list[tuple[str, int]] | list[tuple[str, int, int]] | None = None,
     comment: str = "",
+    weights_by_exercise: dict[int, int] | None = None,
 ) -> WorkoutSession:
-    """Record a performed workout by one user, movement by movement.
+    """Record a performed workout by one user, exercise by exercise.
 
-    `repetitions_by_movement` maps movement id -> repetitions. Every movement of
+    `repetitions_by_exercise` maps exercise id -> repetitions. Every exercise of
     the workout must be present; ids belonging to other workouts are ignored,
     because the track form submits fields for all workouts when JS is off.
 
-    `extra_movements` holds (name, repetitions) pairs for movements done in this
-    session only. They are logged against the session without being added to the
-    workout, so they never show up on the track form again. Pairs with a blank
-    name are dropped, so an untouched row on the form is simply ignored.
+    `weights_by_exercise` maps the same exercise ids to the extra weight carried
+    for those repetitions. Unlike the repetitions it is optional per exercise:
+    an id missing from it is logged at DEFAULT_WEIGHT, so a caller that does not
+    care about weight — or a form submitted without the field — records a
+    session at the lowest weight rather than failing.
+
+    `extra_exercises` holds (name, repetitions) or (name, repetitions, weight)
+    tuples for exercises done in this session only, the weight again defaulting
+    to DEFAULT_WEIGHT. They are logged against the session without being added
+    to the workout, so they never show up on the track form again. Tuples with a
+    blank name are dropped, so an untouched row on the form is simply ignored.
 
     `comment` is a free-text note about the session. It is stripped, and a blank
     one is stored as NULL rather than an empty string, so `session_comments` can
@@ -156,39 +181,51 @@ def log_session(
             f"Keep the comment under {MAX_COMMENT_LENGTH} characters."
         )
 
-    provided = repetitions_by_movement or {}
+    provided = repetitions_by_exercise or {}
+    weights = weights_by_exercise or {}
     logs = []
-    for movement in workout.movements:
-        if movement.id not in provided:
-            raise ValidationError(f"Enter repetitions for '{movement.name}'.")
-        reps = provided[movement.id]
+    for exercise in workout.exercises:
+        if exercise.id not in provided:
+            raise ValidationError(f"Enter repetitions for '{exercise.name}'.")
+        reps = provided[exercise.id]
         if reps not in REPETITION_CHOICES:
             raise ValidationError(
-                f"Repetitions for '{movement.name}' must be between "
+                f"Repetitions for '{exercise.name}' must be between "
                 f"{REPETITION_CHOICES[0]} and {REPETITION_CHOICES[-1]}."
             )
-        logs.append(SessionMovement(movement_id=movement.id, repetitions=reps))
+        weight = weights.get(exercise.id, DEFAULT_WEIGHT)
+        _check_weight(weight, exercise.name)
+        logs.append(
+            SessionExercise(
+                exercise_id=exercise.id, repetitions=reps, weight=weight
+            )
+        )
 
-    of_workout = {movement.name.casefold() for movement in workout.movements}
+    of_workout = {exercise.name.casefold() for exercise in workout.exercises}
     seen_extras: set[str] = set()
-    for name, reps in extra_movements or []:
+    for entry in extra_exercises or []:
+        name, reps = entry[0], entry[1]
+        weight = entry[2] if len(entry) > 2 else DEFAULT_WEIGHT
         name = (name or "").strip()
         if not name:
-            continue  # an untouched extra-movement row on the form
+            continue  # an untouched extra-exercise row on the form
         if name.casefold() in of_workout:
             raise ValidationError(
-                f"'{name}' is already a movement of {workout.name} — "
+                f"'{name}' is already an exercise of {workout.name} — "
                 "set its repetitions above."
             )
         if name.casefold() in seen_extras:
-            raise ValidationError(f"Add the extra movement '{name}' only once.")
+            raise ValidationError(f"Add the extra exercise '{name}' only once.")
         if reps not in REPETITION_CHOICES:
             raise ValidationError(
                 f"Repetitions for '{name}' must be between "
                 f"{REPETITION_CHOICES[0]} and {REPETITION_CHOICES[-1]}."
             )
+        _check_weight(weight, name)
         seen_extras.add(name.casefold())
-        logs.append(SessionMovement(extra_name=name, repetitions=reps))
+        logs.append(
+            SessionExercise(extra_name=name, repetitions=reps, weight=weight)
+        )
 
     session = WorkoutSession(
         workout_id=workout_id,
@@ -223,6 +260,11 @@ def _for_user(query, user_id: int | None):
     if user_id is None:
         return query
     return query.filter(WorkoutSession.user_id == user_id)
+
+
+# The SQL twin of SessionExercise.weight_moved: the extra weight counted once
+# per repetition of it, which is what the analytics page totals as "weight".
+_WEIGHT_MOVED = SessionExercise.repetitions * SessionExercise.weight
 
 
 def _calendar_weeks(
@@ -277,9 +319,9 @@ def _calendar_weeks(
 
 
 def _repetition_trend(dates: dict[date_type, int]) -> dict:
-    """Whether a movement's repetitions are going up, going down or holding.
+    """Whether an exercise's repetitions are going up, going down or holding.
 
-    Splits the movement's own history — the span from the first date it was
+    Splits the exercise's own history — the span from the first date it was
     performed to the last — into two halves of equal length and compares the
     repetitions done in each. Returns
     {"direction": "up" | "down" | "similar" | None, "early": int, "late": int,
@@ -393,40 +435,50 @@ def workout_frequency(user_id: int | None = None) -> list[dict]:
     )
 
 
-def movement_repetitions(
+def exercise_repetitions(
     end: date_type | None = None, user_id: int | None = None
 ) -> list[dict]:
-    """Repetitions per movement across every workout, most repetitions first.
+    """Repetitions per exercise across every workout, most repetitions first.
 
-    Movements are grouped by name, so a movement that appears in several
+    Exercises are grouped by name, so an exercise that appears in several
     workouts — or that was done once as an extra — is reported as a single row
     with its combined total.
 
     `workouts` names where the repetitions came from: the workouts of the
-    sessions the movement was logged in, *not* every workout that has a movement
+    sessions the exercise was logged in, *not* every workout that has an exercise
     of that name. An extra belongs to no workout, so one done only as an extra
     lists none, even when a workout the user never touched happens to contain a
-    movement with the same name. For a movement nobody has performed there are
+    exercise with the same name. For an exercise nobody has performed there are
     no sessions to go on, so it falls back to the workouts it belongs to — the
-    only thing there is to say about it. `extra` says whether the movement was
-    ever logged as a session-only extra. Movements never performed are included
+    only thing there is to say about it. `extra` says whether the exercise was
+    ever logged as a session-only extra. Exercises never performed are included
     with a total of 0.
 
+    `weight` is the weight moved across the exercise's whole history: the extra
+    weight of each log counted once per repetition of it, the same figure as
+    `SessionExercise.weight_moved`. `best_session` is the single session that
+    accounts for most of it — {"weight": int, "date": a `date`, formatted in the
+    template} — or None for an exercise never performed, exactly as `heatmap` is.
+    Two sessions tied on weight are reported at the later date. Unlike `heatmap`
+    both
+    read the whole history rather than the last EXERCISE_HEATMAP_DAYS days, so a
+    best session can predate the grid it is shown above.
+
     `trend` says whether its repetitions are going up, down or holding steady;
-    see `_repetition_trend`. It reads the movement's whole history, not just the
+    see `_repetition_trend`. It reads the exercise's whole history, not just the
     window drawn in `heatmap`.
 
-    `heatmap` is the movement's history as a calendar grid of the last
-    MOVEMENT_HEATMAP_DAYS days — the same shape as `activity_map`, but with each
+    `heatmap` is the exercise's history as a calendar grid of the last
+    EXERCISE_HEATMAP_DAYS days — the same shape as `activity_map`, but with each
     cell counting repetitions instead of sessions, shaded relative to that
-    movement's own busiest day. Repetitions are summed when a movement was done
+    exercise's own busiest day. Repetitions are summed when an exercise was done
     more than once on a date, which can happen across two sessions.
 
-    Filtering by `user_id` narrows the sessions counted *and* the movements
-    listed: a movement that user has never performed is dropped rather than
+    Filtering by `user_id` narrows the sessions counted *and* the exercises
+    listed: an exercise that user has never performed is dropped rather than
     reported at 0, since the whole list would otherwise be padded with rows
     from workouts they have never touched. Without a `user_id` those rows stay,
-    so the page doubles as a list of every movement that exists. A movement
+    so the page doubles as a list of every exercise that exists. An exercise
     logged with 0 repetitions still counts as performed — it was part of the
     session — which is the same line the "Not performed yet" label draws.
     """
@@ -439,130 +491,151 @@ def movement_repetitions(
             {
                 "name": name,
                 "repetitions": 0,
+                "weight": 0,
                 "times": 0,
                 "workouts": [],
                 "extra": False,
                 "heatmap": None,
+                "best_session": None,
                 "trend": _repetition_trend({}),
             },
         )
 
-    # Movements that belong to a workout, whether or not they were ever done.
+    # Exercises that belong to a workout, whether or not they were ever done.
     # Membership alone does not earn a workout a place in `workouts` — see the
-    # `performed_in` query below — but it is what gives a movement nobody has
+    # `performed_in` query below — but it is what gives an exercise nobody has
     # done a row at all.
     member_of: dict[str, set[str]] = {}
     pairs = (
-        db.session.query(Movement.name, Workout.name)
-        .join(Workout, Movement.workout_id == Workout.id)
+        db.session.query(Exercise.name, Workout.name)
+        .join(Workout, Exercise.workout_id == Workout.id)
         .all()
     )
-    for movement_name, workout_name in pairs:
-        bucket(movement_name)
-        member_of.setdefault(movement_name, set()).add(workout_name)
+    for exercise_name, workout_name in pairs:
+        bucket(exercise_name)
+        member_of.setdefault(exercise_name, set()).add(workout_name)
 
-    # The workouts a movement's repetitions actually came from, taken from the
+    # The workouts an exercise's repetitions actually came from, taken from the
     # session each one was logged in. An extra contributes nothing here, which
-    # is what keeps a movement done only as an extra from being labelled with
-    # the workout that happens to have a movement of the same name.
+    # is what keeps an exercise done only as an extra from being labelled with
+    # the workout that happens to have an exercise of the same name.
     performed_in: dict[str, set[str]] = {}
-    for movement_name, workout_name in _for_user(
-        db.session.query(Movement.name, Workout.name)
-        .join(SessionMovement, SessionMovement.movement_id == Movement.id)
-        .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id)
+    for exercise_name, workout_name in _for_user(
+        db.session.query(Exercise.name, Workout.name)
+        .join(SessionExercise, SessionExercise.exercise_id == Exercise.id)
+        .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id)
         .join(Workout, Workout.id == WorkoutSession.workout_id),
         user_id,
     ).distinct():
-        performed_in.setdefault(movement_name, set()).add(workout_name)
+        performed_in.setdefault(exercise_name, set()).add(workout_name)
 
     logged = (
         _for_user(
             db.session.query(
-                Movement.name,
-                db.func.sum(SessionMovement.repetitions),
-                db.func.count(SessionMovement.id),
+                Exercise.name,
+                db.func.sum(SessionExercise.repetitions),
+                db.func.sum(_WEIGHT_MOVED),
+                db.func.count(SessionExercise.id),
             )
-            .join(SessionMovement, SessionMovement.movement_id == Movement.id)
-            .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id),
+            .join(SessionExercise, SessionExercise.exercise_id == Exercise.id)
+            .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id),
             user_id,
         )
-        .group_by(Movement.name)
+        .group_by(Exercise.name)
         .all()
     )
-    for name, reps, times in logged:
+    for name, reps, weight, times in logged:
         row = bucket(name)
         row["repetitions"] += int(reps or 0)
+        row["weight"] += int(weight or 0)
         row["times"] += times
 
-    # Extras carry their own name instead of pointing at a movement row.
+    # Extras carry their own name instead of pointing at an exercise row.
     extras = (
         _for_user(
             db.session.query(
-                SessionMovement.extra_name,
-                db.func.sum(SessionMovement.repetitions),
-                db.func.count(SessionMovement.id),
+                SessionExercise.extra_name,
+                db.func.sum(SessionExercise.repetitions),
+                db.func.sum(_WEIGHT_MOVED),
+                db.func.count(SessionExercise.id),
             )
-            .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id)
-            .filter(SessionMovement.movement_id.is_(None)),
+            .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id)
+            .filter(SessionExercise.exercise_id.is_(None)),
             user_id,
         )
-        .group_by(SessionMovement.extra_name)
+        .group_by(SessionExercise.extra_name)
         .all()
     )
-    for name, reps, times in extras:
+    for name, reps, weight, times in extras:
         row = bucket(name)
         row["repetitions"] += int(reps or 0)
+        row["weight"] += int(weight or 0)
         row["times"] += times
         row["extra"] = True
 
-    # Repetitions per date, so each movement can be drawn as a heatmap.
+    # One row per session an exercise was logged in, which gives both the
+    # repetitions per date the heatmap and the trend are drawn from — summed
+    # when an exercise landed twice on one day, possible across two sessions —
+    # and the weight per session the best one is picked out of.
     per_date: dict[str, dict[date_type, int]] = {}
-    linked_dates = (
+    best: dict[str, tuple[int, date_type, int]] = {}
+    linked_sessions = (
         _for_user(
             db.session.query(
-                Movement.name,
+                Exercise.name,
                 WorkoutSession.date,
-                db.func.sum(SessionMovement.repetitions),
+                WorkoutSession.id,
+                db.func.sum(SessionExercise.repetitions),
+                db.func.sum(_WEIGHT_MOVED),
             )
-            .join(SessionMovement, SessionMovement.movement_id == Movement.id)
-            .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id),
+            .join(SessionExercise, SessionExercise.exercise_id == Exercise.id)
+            .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id),
             user_id,
         )
-        .group_by(Movement.name, WorkoutSession.date)
+        .group_by(Exercise.name, WorkoutSession.id)
         .all()
     )
-    extra_dates = (
+    extra_sessions = (
         _for_user(
             db.session.query(
-                SessionMovement.extra_name,
+                SessionExercise.extra_name,
                 WorkoutSession.date,
-                db.func.sum(SessionMovement.repetitions),
+                WorkoutSession.id,
+                db.func.sum(SessionExercise.repetitions),
+                db.func.sum(_WEIGHT_MOVED),
             )
-            .join(WorkoutSession, WorkoutSession.id == SessionMovement.session_id)
-            .filter(SessionMovement.movement_id.is_(None)),
+            .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id)
+            .filter(SessionExercise.exercise_id.is_(None)),
             user_id,
         )
-        .group_by(SessionMovement.extra_name, WorkoutSession.date)
+        .group_by(SessionExercise.extra_name, WorkoutSession.id)
         .all()
     )
-    for name, day, reps in linked_dates + extra_dates:
+    for name, day, session_id, reps, weight in linked_sessions + extra_sessions:
         dates = per_date.setdefault(name, {})
         dates[day] = dates.get(day, 0) + int(reps or 0)
+        # Compared as a tuple, so a weight matched again is reported at the
+        # later date rather than the first time it was reached.
+        candidate = (int(weight or 0), day, session_id)
+        if candidate > best.get(name, (-1,)):
+            best[name] = candidate
 
     for name, dates in per_date.items():
         row = bucket(name)
-        row["heatmap"] = _calendar_weeks(dates, end, MOVEMENT_HEATMAP_DAYS)
+        row["heatmap"] = _calendar_weeks(dates, end, EXERCISE_HEATMAP_DAYS)
         row["trend"] = _repetition_trend(dates)
+        weight, day, _ = best[name]
+        row["best_session"] = {"weight": weight, "date": day}
 
     for name, row in buckets.items():
-        # Where the repetitions came from, or — for a movement nobody has done
+        # Where the repetitions came from, or — for an exercise nobody has done
         # — the workouts it is waiting in.
         source = performed_in.get(name) if row["times"] else member_of.get(name)
         row["workouts"] = sorted(source or ())
 
     rows = list(buckets.values())
     if user_id is not None:
-        # Every movement of every workout would otherwise show up on one
+        # Every exercise of every workout would otherwise show up on one
         # person's page as a "Not performed yet" row. `times` is 0 for exactly
         # those, and is what leaves `heatmap` None.
         rows = [row for row in rows if row["times"]]
@@ -640,8 +713,10 @@ def feeling_trend(
     }
 
 
-def session_comments(user_id: int | None = None) -> list[dict]:
-    """The sessions that carry a free-text note, most recent first.
+def session_comments(
+    user_id: int | None = None, limit: int = COMMENT_LIMIT
+) -> list[dict]:
+    """The most recent sessions that carry a free-text note, newest first.
 
     Each entry is {"date": date, "workout": str, "feeling": str, "user": str,
     "comment": str}. Sessions without a comment are left out entirely, so this
@@ -649,6 +724,13 @@ def session_comments(user_id: int | None = None) -> list[dict]:
     on one date are ordered newest-logged first, which the session id stands in
     for. `user` is carried on every entry so the across-everyone view can say
     who wrote the note; the per-user view already knows.
+
+    At most `limit` entries come back — COMMENT_LIMIT of them by default, which
+    is what the analytics page shows and names in its own copy. The cut is a SQL
+    LIMIT applied after the ordering, so it keeps the newest notes rather than
+    whichever the database happened to return first, and it is applied after
+    `user_id` narrows the rows: picking a user lists their last `limit` notes,
+    not their share of everyone's last `limit`.
     """
     rows = (
         _for_user(
@@ -666,6 +748,7 @@ def session_comments(user_id: int | None = None) -> list[dict]:
             user_id,
         )
         .order_by(WorkoutSession.date.desc(), WorkoutSession.id.desc())
+        .limit(limit)
         .all()
     )
     return [

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Analytics · Training Log{% endblock %}
 
-{# GitHub-style calendar grid, shared by the activity map and the per-movement
+{# GitHub-style calendar grid, shared by the activity map and the per-exercise
    heatmaps: one cell per day, shaded 0-4 relative to the busiest day. #}
 {% macro heatmap(data, label, unit) %}
   <div class="heatmap-wrap">
@@ -27,7 +27,7 @@
   </div>
 {% endmacro %}
 
-{# Up / down / steady badge for a movement's repetition trend. Renders nothing
+{# Up / down / steady badge for an exercise's repetition trend. Renders nothing
    at all when there is no direction, so the heading stays clean. #}
 {%- macro trend_badge(trend) -%}
 {%- if trend.direction -%}
@@ -61,7 +61,7 @@
 </form>
 <p class="lede">
   {%- if user %}
-    Everything {{ user.name }} ({{ user.age }}) has logged — only the workouts and movements they have actually performed.
+    Everything {{ user.name }} ({{ user.age }}) has logged — only the workouts and exercises they have actually performed.
   {%- else %}
     Everything logged so far, across all users. Pick a user above for their numbers alone.
   {%- endif %}
@@ -154,20 +154,27 @@
 </section>
 
 <section>
-  <h2>Repetitions per movement</h2>
-  <p class="lede">{% if user %}Every movement {{ user.name }} has performed{% else %}Every movement across all of your workouts{% endif %}, and how many repetitions you did of it on each day of the last 12 months. Each movement is shaded against its own busiest day. The trend splits a movement's history in half and compares the repetitions in each, so it says whether you are doing more of it, less of it, or about the same.</p>
-  {% if movements %}
-    <p class="big-stat">{{ movements | sum(attribute='repetitions') }} <span>repetitions in total</span></p>
+  <h2>Repetitions per exercise</h2>
+  <p class="lede">{% if user %}Every exercise {{ user.name }} has performed{% else %}Every exercise across all of your workouts{% endif %}, and how many repetitions you did of it on each day of the last 12 months. The weight moved is the extra weight of each set counted once per repetition of it, so a heavy set of few repetitions and a light set of many are comparable. Each exercise is shaded against its own busiest day. The trend splits an exercise's history in half and compares the repetitions in each, so it says whether you are doing more of it, less of it, or about the same.</p>
+  {% if exercises %}
+    <div class="stat-row">
+      <p class="big-stat">{{ exercises | sum(attribute='repetitions') }} <span>repetitions in total</span></p>
+      <p class="big-stat">{{ exercises | sum(attribute='weight') }} <span>{{ weight_unit }} moved in total</span></p>
+    </div>
     {{ heatmap_legend() }}
-    {% for row in movements %}
-      <article class="movement-block">
+    {% for row in exercises %}
+      <article class="exercise-block">
         <h3>{{ row.name }}{{ trend_badge(row.trend) }}</h3>
         {%- set labels = row.workouts + ['extra, this session only'] if row.extra else row.workouts %}
         <p class="chart-caption">
           {%- if row.heatmap %}
             {{ row.repetitions }} repetition{{ '' if row.repetitions == 1 else 's' }}
             across {{ row.times }} session{{ '' if row.times == 1 else 's' }}
-            · best day {{ row.heatmap.max }}
+            · {{ row.weight }} {{ weight_unit }} moved
+            {#- the best session can predate the grid below, which only spans a year #}
+            · best session {{ row.best_session.weight }} {{ weight_unit }}
+            on {{ row.best_session.date.strftime('%d %b %Y') }}
+            · best day {{ row.heatmap.max }} repetition{{ '' if row.heatmap.max == 1 else 's' }}
           {%- else %}
             Not performed yet
           {%- endif %}
@@ -179,14 +186,14 @@
       </article>
     {% endfor %}
   {% elif user %}
-    <p class="empty">{{ user.name }} hasn't performed a movement yet — <a href="{{ url_for('main.track') }}">track a session</a>.</p>
+    <p class="empty">{{ user.name }} hasn't performed an exercise yet — <a href="{{ url_for('main.track') }}">track a session</a>.</p>
   {% else %}
     <p class="empty">Nothing to analyse yet — create a workout and track a session first.</p>
   {% endif %}
 </section>
 <section>
   <h2>Session comments</h2>
-  <p class="lede">Everything noted down while tracking, most recent first.</p>
+  <p class="lede">The last {{ comment_limit }} notes written while tracking, most recent first.</p>
   {% if comments %}
     <ol class="comment-log">
       {% for c in comments %}

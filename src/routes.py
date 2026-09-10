@@ -5,19 +5,24 @@ from flask import Blueprint, flash, redirect, render_template, request, url_for
 from src import services
 from src.models import FEELINGS
 from src.services import (
+    DEFAULT_WEIGHT,
     DURATION_CHOICES,
     MAX_AGE,
     MAX_COMMENT_LENGTH,
     MIN_AGE,
     REPETITION_CHOICES,
+    WEIGHT_CHOICES,
+    WEIGHT_UNIT,
     ValidationError,
 )
 
 bp = Blueprint("main", __name__)
 
-REPS_FIELD_PREFIX = "reps-"  # one field per movement: reps-<movement id>
-EXTRA_NAME_FIELD = "extra-name"  # repeatable pair of fields for the movements
+REPS_FIELD_PREFIX = "reps-"  # one field per exercise: reps-<exercise id>
+WEIGHT_FIELD_PREFIX = "weight-"  # and one for its extra weight: weight-<id>
+EXTRA_NAME_FIELD = "extra-name"  # repeatable row of fields for the exercises
 EXTRA_REPS_FIELD = "extra-reps"  # done in this session only
+EXTRA_WEIGHT_FIELD = "extra-weight"
 USER_FIELD = "user_id"  # picks the user on /track, filters /analytics
 COMMENT_FIELD = "comment"  # the session's free-text note
 
@@ -59,12 +64,12 @@ def _age_from_form(form) -> int:
 
 @bp.route("/create", methods=["GET", "POST"])
 def create():
-    """Page 1: create a workout with its movements."""
+    """Page 1: create a workout with its exercises."""
     if request.method == "POST":
         try:
             workout = services.create_workout(
                 request.form.get("name", ""),
-                request.form.getlist("movements"),
+                request.form.getlist("exercises"),
             )
             flash(f"Workout '{workout.name}' saved.", "success")
             return redirect(url_for("main.create"))
@@ -73,39 +78,62 @@ def create():
     return render_template(
         "create.html",
         workouts=services.get_all_workouts(),
-        known_movements=services.known_movement_names(),
+        known_exercises=services.known_exercise_names(),
     )
 
 
 def _repetitions_from_form(form) -> dict[int, int]:
-    """Read the per-movement `reps-<movement id>` fields off a submitted form."""
-    reps = {}
+    """Read the per-exercise `reps-<exercise id>` fields off a submitted form."""
+    return _by_exercise_id(form, REPS_FIELD_PREFIX)
+
+
+def _weights_from_form(form) -> dict[int, int]:
+    """Read the per-exercise `weight-<exercise id>` fields off a submitted form.
+
+    An exercise with no field of its own is simply absent, which `log_session`
+    reads as the default weight rather than as an error.
+    """
+    return _by_exercise_id(form, WEIGHT_FIELD_PREFIX)
+
+
+def _by_exercise_id(form, prefix: str) -> dict[int, int]:
+    """Collect the `<prefix><exercise id>` fields into an exercise id -> int map."""
+    values = {}
     for key, value in form.items():
-        if not key.startswith(REPS_FIELD_PREFIX):
+        if not key.startswith(prefix):
             continue
-        movement_id = int(key.removeprefix(REPS_FIELD_PREFIX))
-        reps[movement_id] = int(value)
-    return reps
+        exercise_id = int(key.removeprefix(prefix))
+        values[exercise_id] = int(value)
+    return values
 
 
-def _extra_movements_from_form(form) -> list[tuple[str, int]]:
-    """Read the repeatable extra-movement rows: a name and a reps field each.
+def _extra_exercises_from_form(form) -> list[tuple[str, int, int]]:
+    """Read the repeatable extra-exercise rows: a name, reps and weight each.
 
-    Rows left blank are dropped here so an untouched row never reaches the
-    service (and so its unused reps field can't fail to parse).
+    The name and reps lists are zipped positionally. Weights are read by the
+    same position but run out gracefully: a row with no weight field of its own
+    is logged at DEFAULT_WEIGHT, the same fallback `log_session` applies to a
+    exercise missing from `weights_by_exercise`. Rows left blank are dropped
+    here so an untouched row never reaches the service (and so its unused
+    number fields can't fail to parse).
     """
     names = form.getlist(EXTRA_NAME_FIELD)
     reps = form.getlist(EXTRA_REPS_FIELD)
+    weights = form.getlist(EXTRA_WEIGHT_FIELD)
     return [
-        (name, int(value))
-        for name, value in zip(names, reps)
+        (
+            name,
+            int(value),
+            int(weights[i]) if i < len(weights) else DEFAULT_WEIGHT,
+        )
+        for i, (name, value) in enumerate(zip(names, reps))
         if name.strip()
     ]
 
 
 @bp.route("/track", methods=["GET", "POST"])
 def track():
-    """Page 2: log a performed workout session, movement by movement."""
+    """Page 2: log a performed workout session, exercise by exercise."""
     if request.method == "POST":
         try:
             session = services.log_session(
@@ -113,15 +141,17 @@ def track():
                 user_id=int(request.form.get(USER_FIELD, 0)),
                 session_date=date_type.fromisoformat(request.form.get("date", "")),
                 duration_minutes=int(request.form.get("duration", 0)),
-                repetitions_by_movement=_repetitions_from_form(request.form),
+                repetitions_by_exercise=_repetitions_from_form(request.form),
+                weights_by_exercise=_weights_from_form(request.form),
                 feeling=request.form.get("feeling", ""),
-                extra_movements=_extra_movements_from_form(request.form),
+                extra_exercises=_extra_exercises_from_form(request.form),
                 comment=request.form.get(COMMENT_FIELD, ""),
             )
             flash(
                 f"Logged {session.workout.name} for {session.user.name} on "
                 f"{session.date.isoformat()} "
-                f"({session.total_repetitions} repetitions).",
+                f"({session.total_repetitions} repetitions, "
+                f"{session.total_weight} {WEIGHT_UNIT}).",
                 "success",
             )
             return redirect(url_for("main.track"))
@@ -135,10 +165,14 @@ def track():
         dates=services.date_choices(),
         durations=DURATION_CHOICES,
         repetitions=REPETITION_CHOICES,
+        weights=WEIGHT_CHOICES,
+        weight_unit=WEIGHT_UNIT,
         feelings=FEELINGS,
         reps_prefix=REPS_FIELD_PREFIX,
+        weight_prefix=WEIGHT_FIELD_PREFIX,
         extra_name_field=EXTRA_NAME_FIELD,
         extra_reps_field=EXTRA_REPS_FIELD,
+        extra_weight_field=EXTRA_WEIGHT_FIELD,
         comment_field=COMMENT_FIELD,
         max_comment_length=MAX_COMMENT_LENGTH,
     )
@@ -157,13 +191,15 @@ def analytics():
         "analytics.html",
         activity=services.activity_map(user_id=user_id),
         frequency=services.workout_frequency(user_id=user_id),
-        movements=services.movement_repetitions(user_id=user_id),
+        exercises=services.exercise_repetitions(user_id=user_id),
         trend=services.feeling_trend(user_id=user_id),
         comments=services.session_comments(user_id=user_id),
         trend_days=services.TREND_DAYS,
+        comment_limit=services.COMMENT_LIMIT,
         users=services.get_all_users(),
         user=user,
         user_field=USER_FIELD,
+        weight_unit=WEIGHT_UNIT,
     )
 
 

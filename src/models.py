@@ -25,12 +25,12 @@ class User(db.Model):
 
 
 class Workout(db.Model):
-    """A workout template, e.g. 'Leg day', made up of movements."""
+    """A workout template, e.g. 'Leg day', made up of exercises."""
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), unique=True, nullable=False)
-    movements = db.relationship(
-        "Movement", backref="workout", cascade="all, delete-orphan", lazy=True
+    exercises = db.relationship(
+        "Exercise", backref="workout", cascade="all, delete-orphan", lazy=True
     )
     sessions = db.relationship(
         "WorkoutSession", backref="workout", cascade="all, delete-orphan", lazy=True
@@ -40,18 +40,18 @@ class Workout(db.Model):
         return f"<Workout {self.name}>"
 
 
-class Movement(db.Model):
-    """A single movement (exercise) belonging to a workout."""
+class Exercise(db.Model):
+    """A single exercise belonging to a workout, e.g. 'Squat'."""
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
     workout_id = db.Column(db.Integer, db.ForeignKey("workout.id"), nullable=False)
     logs = db.relationship(
-        "SessionMovement", backref="movement", cascade="all, delete-orphan", lazy=True
+        "SessionExercise", backref="exercise", cascade="all, delete-orphan", lazy=True
     )
 
     def __repr__(self) -> str:
-        return f"<Movement {self.name}>"
+        return f"<Exercise {self.name}>"
 
 
 class WorkoutSession(db.Model):
@@ -65,13 +65,18 @@ class WorkoutSession(db.Model):
     feeling = db.Column(db.String(10), nullable=False)  # good / okay / bad
     comment = db.Column(db.Text)  # free text, NULL when the field was left blank
     logs = db.relationship(
-        "SessionMovement", backref="session", cascade="all, delete-orphan", lazy=True
+        "SessionExercise", backref="session", cascade="all, delete-orphan", lazy=True
     )
 
     @property
     def total_repetitions(self) -> int:
-        """Repetitions across every movement performed in this session."""
+        """Repetitions across every exercise performed in this session."""
         return sum(log.repetitions for log in self.logs)
+
+    @property
+    def total_weight(self) -> int:
+        """Weight moved across every exercise performed in this session."""
+        return sum(log.weight_moved for log in self.logs)
 
     def __repr__(self) -> str:
         return (
@@ -80,30 +85,49 @@ class WorkoutSession(db.Model):
         )
 
 
-class SessionMovement(db.Model):
-    """Repetitions logged for one movement within one session.
+class SessionExercise(db.Model):
+    """Repetitions logged for one exercise within one session.
 
-    Either `movement_id` points at a movement of the workout, or `extra_name`
-    carries the name of an extra movement done in this session only — added on
+    Either `exercise_id` points at an exercise of the workout, or `extra_name`
+    carries the name of an extra exercise done in this session only — added on
     the track page without becoming part of the workout template.
+
+    `weight` is the extra weight carried for those repetitions. It is always
+    set — an exercise done with no added load is logged at the lowest choice,
+    1 — so `weight_moved` can be summed without special-casing.
     """
 
     id = db.Column(db.Integer, primary_key=True)
     session_id = db.Column(
         db.Integer, db.ForeignKey("workout_session.id"), nullable=False
     )
-    movement_id = db.Column(db.Integer, db.ForeignKey("movement.id"))
-    extra_name = db.Column(db.String(120))  # set only when movement_id is None
+    exercise_id = db.Column(db.Integer, db.ForeignKey("exercise.id"))
+    extra_name = db.Column(db.String(120))  # set only when exercise_id is None
     repetitions = db.Column(db.Integer, nullable=False)  # 0-120
+    weight = db.Column(db.Integer, nullable=False, default=1)  # 1-200, extra load
 
     @property
     def is_extra(self) -> bool:
-        """True for a movement logged only in this session."""
-        return self.movement_id is None
+        """True for an exercise logged only in this session."""
+        return self.exercise_id is None
 
     @property
     def name(self) -> str:
-        return self.extra_name if self.is_extra else self.movement.name
+        return self.extra_name if self.is_extra else self.exercise.name
+
+    @property
+    def weight_moved(self) -> int:
+        """The extra weight, once per repetition of it.
+
+        This is what the analytics page reports as an exercise's total weight,
+        so a heavy set of few repetitions and a light set of many are
+        comparable. An exercise logged at 0 repetitions moved nothing, whatever
+        weight was picked for it.
+        """
+        return self.repetitions * self.weight
 
     def __repr__(self) -> str:
-        return f"<SessionMovement {self.name} reps={self.repetitions}>"
+        return (
+            f"<SessionExercise {self.name} reps={self.repetitions} "
+            f"weight={self.weight}>"
+        )

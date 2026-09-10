@@ -1,7 +1,7 @@
 # Training Log
 
 A small Flask app for keeping a workout diary: define your workouts, log each
-session movement by movement, and see what the numbers say.
+session exercise by exercise, and see what the numbers say.
 
 It's a single-user local app — no accounts, no login. Data lives in a SQLite
 file on your machine.
@@ -35,15 +35,15 @@ in-browser debugger. Don't expose it beyond localhost.
 
 ### Create — `/create`
 
-Name a workout and list the movements it consists of ("Leg day": back squat,
-lunges). Add as many movement fields as you need. Workout names must be unique,
-and a workout needs at least one movement. Existing workouts and their movements
+Name a workout and list the exercises it consists of ("Leg day": back squat,
+lunges). Add as many exercise fields as you need. Workout names must be unique,
+and a workout needs at least one exercise. Existing workouts and their exercises
 are listed underneath.
 
-Under the movement fields, every movement already in your log is offered as a
-button — the movements of your other workouts as well as any extra movement you
+Under the exercise fields, every exercise already in your log is offered as a
+button — the exercises of your other workouts as well as any extra exercise you
 logged on the track page. Selecting one fills it into the form, so you don't
-retype it. Selecting the same movement twice does nothing, and a duplicate is
+retype it. Selecting the same exercise twice does nothing, and a duplicate is
 dropped when the workout is saved either way.
 
 ### Track — `/track`
@@ -55,19 +55,20 @@ Log a session you've done:
 | Workout | any workout you've created |
 | Date | today or any of the previous 30 days |
 | Length | 10–90 minutes, in 5-minute steps |
-| Repetitions | 0–120, **entered separately for every movement of the workout** (0 = part of the session but not done) |
+| Repetitions | 0–120, **entered separately for every exercise of the workout** (0 = part of the session but not done) |
+| Extra kg | 1–200, also per exercise — the extra weight you carried for those repetitions. Leave it at 1 for bodyweight |
 | Feeling | good, okay or bad |
-| Extra movements | any number of one-off movements with their own repetitions |
+| Extra exercises | any number of one-off exercises with their own repetitions and weight |
 
-Choosing a workout reveals its movements, each with its own repetition
-dropdown, so the session records what you actually did per exercise rather
-than a single lump total.
+Choosing a workout reveals its exercises, each with its own repetition and
+weight dropdown, so the session records what you actually did per exercise
+rather than a single lump total.
 
-Did something that isn't part of the workout? **Add another movement** under
-"Extra movements" records it with its repetitions for this session only. It
-counts towards your analytics like any other movement, but it is *not* added to
+Did something that isn't part of the workout? **Add another exercise** under
+"Extra exercises" records it with its repetitions for this session only. It
+counts towards your analytics like any other exercise, but it is *not* added to
 the workout, so the next session won't ask you for it. An extra can't repeat a
-movement the workout already has — set that movement's repetitions instead.
+exercise the workout already has — set that exercise's repetitions instead.
 
 ### Analytics — `/analytics`
 
@@ -84,21 +85,28 @@ Four sections, top to bottom:
    and scaled by how the workout felt (good is tallest). Days without a workout
    show a flat marker, so rest days stay visible as rest rather than as missing
    data. If you logged more than one session on a day, the bar shows the average.
-4. **Repetitions per movement** — your total repetitions, then a heatmap per
-   movement: one cell per day of the last 12 months, shaded by how many
-   repetitions you did of that movement that day. Each movement is shaded
-   against its own busiest day, so a light cell for one movement and a light
+4. **Repetitions per exercise** — your total repetitions and total weight
+   moved, then a heatmap per exercise: one cell per day of the last 12 months,
+   shaded by how many repetitions you did of that exercise that day. Each exercise is shaded
+   against its own busiest day, so a light cell for one exercise and a light
    cell for another don't mean the same number — the caption gives each
-   movement's best day. Movements are grouped by name, so one that appears in
+   exercise's best day. Exercises are grouped by name, so one that appears in
    several workouts gets a single heatmap with its days combined; extra
-   movements appear here too, marked "extra, this session only".
+   exercises appear here too, marked "extra, this session only".
 
-   Each movement carries a trend badge — **↑ going up**, **↓ going down** or
-   **→ holding steady** — comparing the first half of that movement's history
+   Each caption also gives the **weight moved** for that exercise — the extra
+   weight of each set counted once per repetition of it, so 10 reps at 40 kg
+   counts the same as 20 reps at 20 kg — and the **best session**, the single
+   session that accounts for most of it, with its date. Both cover your whole
+   history rather than just the 12 months in the grid, so a best session can be
+   older than the heatmap below it.
+
+   Each exercise carries a trend badge — **↑ going up**, **↓ going down** or
+   **→ holding steady** — comparing the first half of that exercise's history
    with the second half, with the percentage change where there is an earlier
    baseline to compare against. A change within 15% either way counts as
    holding steady. Hover the badge for both half-totals and the split date. A
-   movement performed on only one date gets no badge, since there is nothing to
+   exercise performed on only one date gets no badge, since there is nothing to
    compare.
 
 ## How it's put together
@@ -120,15 +128,16 @@ logic testable without going through HTTP.
 ### Data model
 
 - **Workout** — a template, e.g. "Leg day".
-- **Movement** — one exercise belonging to a workout.
+- **Exercise** — one exercise belonging to a workout, e.g. "Squat".
 - **WorkoutSession** — one performed instance of a workout: date, length, feeling.
-- **SessionMovement** — the repetitions done for one movement within one session.
-  It either points at a `Movement` of the workout, or carries its own
-  `extra_name` for a movement done in that session only.
+- **SessionExercise** — the repetitions done for one exercise within one session,
+  and the extra weight carried for them. It either points at a `Exercise` of the
+  workout, or carries its own `extra_name` for an exercise done in that session
+  only.
 
-Repetitions hang off `SessionMovement`, not off the session, which is what makes
-the per-movement analytics possible. Deleting a workout cascades to its
-movements, sessions and logged repetitions.
+Repetitions and weight hang off `SessionExercise`, not off the session, which is
+what makes the per-exercise analytics possible. Deleting a workout cascades to
+its exercises, sessions and logged repetitions.
 
 There are no migrations: `create_app` calls `db.create_all()`, which creates
 missing tables but never alters existing ones. If you change a model you have to
