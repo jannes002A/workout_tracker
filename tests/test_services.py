@@ -517,7 +517,7 @@ def test_log_session_records_the_weight_per_exercise(app, workout, user):
     }
 
 
-def test_log_session_defaults_a_missing_weight_to_the_lowest_choice(app, workout, user):
+def test_log_session_defaults_a_missing_weight_to_no_extra_weight(app, workout, user):
     """The weight is optional per exercise, unlike the repetitions."""
     session = services.log_session(
         workout.id,
@@ -530,16 +530,51 @@ def test_log_session_defaults_a_missing_weight_to_the_lowest_choice(app, workout
     )
     assert {log.name: log.weight for log in session.logs} == {
         "Squat": 60,
-        "Lunge": services.DEFAULT_WEIGHT,
+        "Lunge": services.NO_WEIGHT,
     }
-    assert services.DEFAULT_WEIGHT == 1
+    assert services.DEFAULT_WEIGHT is services.NO_WEIGHT
 
 
-def test_log_session_without_any_weights_uses_the_default(app, workout, user):
+def test_log_session_without_any_weights_records_no_extra_weight(app, workout, user):
     session = services.log_session(
         workout.id, user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good"
     )
-    assert [log.weight for log in session.logs] == [1, 1]
+    assert [log.weight for log in session.logs] == [None, None]
+    assert [log.has_weight for log in session.logs] == [False, False]
+
+
+def test_log_session_records_an_explicit_no_extra_weight(app, workout, user):
+    """Picking "none" on the track page is not the same as a weight of 0."""
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 30, 20),
+        "good",
+        weights_by_exercise=weights_for(workout, 60, services.NO_WEIGHT),
+    )
+    lunge = next(log for log in session.logs if log.name == "Lunge")
+    assert lunge.weight is None
+    assert lunge.has_weight is False
+    assert lunge.repetitions == 20  # still counted, in repetitions alone
+
+
+def test_log_session_records_an_extra_exercise_without_extra_weight(
+    app, workout, user
+):
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 30, 20),
+        "good",
+        extra_exercises=[("Pull-up", 12, services.NO_WEIGHT)],
+    )
+    pull_up = next(log for log in session.logs if log.name == "Pull-up")
+    assert pull_up.weight is None
+    assert pull_up.weight_moved is None
 
 
 @pytest.mark.parametrize("weight", [0, -1, 201, 1000])
@@ -628,7 +663,7 @@ def test_log_session_extra_exercise_without_a_weight_uses_the_default(
         extra_exercises=[("Pull-up", 12)],
     )
     pull_up = next(log for log in session.logs if log.name == "Pull-up")
-    assert pull_up.weight == services.DEFAULT_WEIGHT
+    assert pull_up.weight is services.NO_WEIGHT
 
 
 @pytest.mark.parametrize("weight", [0, -1, 201])
@@ -662,6 +697,23 @@ def test_weight_moved_is_the_weight_once_per_repetition(app, workout, user):
     }
 
 
+def test_weight_moved_is_none_without_an_extra_weight(app, workout, user):
+    """No load carried, so there is no weight to report — not a weight of 0."""
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 30, 20),
+        "good",
+        weights_by_exercise=weights_for(workout, 60, services.NO_WEIGHT),
+    )
+    assert {log.name: log.weight_moved for log in session.logs} == {
+        "Squat": 1800,
+        "Lunge": None,
+    }
+
+
 def test_weight_moved_is_zero_for_a_exercise_not_done(app, workout, user):
     """0 repetitions moved nothing, however heavy the weight picked was."""
     session = services.log_session(
@@ -691,6 +743,28 @@ def test_session_total_weight_sums_every_exercise(app, workout, user):
     assert session.total_weight == 1800 + 500 + 50
 
 
+def test_session_total_weight_skips_exercises_without_extra_weight(app, workout, user):
+    """A bodyweight set adds nothing; its repetitions are counted all the same."""
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 30, 20),
+        "good",
+        weights_by_exercise=weights_for(workout, 60, services.NO_WEIGHT),
+    )
+    assert session.total_weight == 1800
+    assert session.total_repetitions == 50
+
+
+def test_session_total_weight_is_zero_without_any_extra_weight(app, workout, user):
+    session = services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good"
+    )
+    assert session.total_weight == 0
+
+
 def test_date_choices_span_and_order():
     today = date(2026, 9, 8)
     choices = services.date_choices(days_back=30, today=today)
@@ -711,4 +785,6 @@ def test_weight_choices_bounds_and_default():
     assert services.WEIGHT_CHOICES[0] == 1
     assert services.WEIGHT_CHOICES[-1] == 200
     assert len(services.WEIGHT_CHOICES) == 200
-    assert services.DEFAULT_WEIGHT == services.WEIGHT_CHOICES[0]
+    assert services.NO_WEIGHT is None
+    assert services.NO_WEIGHT not in services.WEIGHT_CHOICES
+    assert services.DEFAULT_WEIGHT is services.NO_WEIGHT

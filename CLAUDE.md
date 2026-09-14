@@ -16,13 +16,22 @@ python main.py                # dev server with debug=True on http://127.0.0.1:5
 pytest                        # all tests
 pytest tests/test_services.py::test_log_session_valid             # single test
 pytest -k feeling_trend                                           # by name
+docker compose up -d --build  # the deployment, gunicorn on http://127.0.0.1:8000
 ```
+
+Dependencies split three ways in `pyproject.toml`: the runtime two (`flask`,
+`flask-sqlalchemy`), the `deploy` **extra** (`gunicorn`, which only the
+container installs) and the `dev` group (`pytest`). `requirements.txt` is the
+flat list of all of them.
 
 There are no migrations — `create_app` just calls `db.create_all()`, which creates missing
 tables but never alters existing ones. After a model change, drop the affected table (or
 delete `instance/workouts.db` to reset all data) or the old columns will linger and inserts
 will fail. (`SessionExercise.weight` was added that way — an `instance/workouts.db`
-predating it needs its `session_exercise` table dropped.)
+predating it needs its `session_exercise` table dropped. It later became
+`nullable=True` for the "no extra weight" option, which SQLite will not relax
+in place either: a database carrying the old `weight INTEGER NOT NULL` rejects
+every bodyweight log until that table is dropped or rebuilt.)
 
 ## Architecture
 
@@ -37,22 +46,27 @@ The key structural rule is the **routes/services split**:
 
 `src/models.py`: `User` → `WorkoutSession`, `Workout` → `Exercise` (what the template is made of) and `Workout` → `WorkoutSession` (performed instances). Repetitions are **per exercise, not per session**: `SessionExercise` carries a repetition count *and an extra weight* for one exercise within one session, and `WorkoutSession.total_repetitions` sums the first. Every relationship cascades `all, delete-orphan`, so deleting a workout clears its exercises, sessions and logs.
 
-`SessionExercise.weight` is the extra load carried for those repetitions. It is
-`nullable=False` and always set — an exercise done with no added load is logged at
-the lowest choice, 1 — so `SessionExercise.weight_moved` (`repetitions * weight`)
-and `WorkoutSession.total_weight` can sum without special-casing a NULL. That
-product, not the bare weight, is what the analytics page totals: it makes a heavy
-set of few repetitions and a light set of many comparable, and it is 0 for a
+`SessionExercise.weight` is the extra load carried for those repetitions, and is
+**NULL when there was none** — a bodyweight exercise, which is what the track page
+pre-selects. NULL is not a weight of 0: it means the exercise is counted in
+repetitions only and is left out of every weight figure rather than being totalled
+as nothing. `SessionExercise.weight_moved` (`repetitions * weight`) is `None` for
+such a log, `has_weight` says whether there is one, and `WorkoutSession.total_weight`
+sums `weight_moved or 0`, so a session of nothing but bodyweight exercises totals 0.
+`weight_moved`, not the bare weight, is what the analytics page totals: it makes a
+heavy set of few repetitions and a light set of many comparable, and it is 0 for an
 exercise logged at 0 repetitions however heavy the weight picked was.
-`_WEIGHT_MOVED` in `services.py` is the SQL twin of `weight_moved`, so the Python
-property and the queries cannot drift.
+`_WEIGHT_MOVED` in `services.py` is the SQL twin of `weight_moved` — NULL for the
+same rows, which `SUM()` then skips — so the Python property and the queries cannot
+drift. `_WEIGHTED_LOGS` alongside it is `COUNT(weight)`, 0 for an exercise only ever
+done at bodyweight, which is what the `weighted` flag on an analytics row comes from.
 
 A `SessionExercise` is one of two things, which `is_extra` distinguishes and the `name` property papers over:
 
 - `exercise_id` set — an exercise of the workout template.
 - `exercise_id` NULL and `extra_name` set — an **extra exercise**, done in that session only. It is logged and analysed like any other exercise but deliberately creates no `Exercise` row, so it never joins the workout and is not asked for again next session.
 
-Allowed enum-like values live next to what they constrain: `FEELINGS` and `FEELING_SCORES` (bad=1, okay=2, good=3, used to plot the trend) in `models.py`; `DURATION_CHOICES` (10–90 in steps of 5), `REPETITION_CHOICES` (0–120, where 0 records an exercise that was part of the session but not done), `WEIGHT_CHOICES` (1–200) with `DEFAULT_WEIGHT` = `WEIGHT_CHOICES[0]` and `WEIGHT_UNIT` ("kg", only ever displayed — nothing converts between units), `MIN_AGE`/`MAX_AGE` (1–120) and `MAX_COMMENT_LENGTH` (2000, the textarea's `maxlength` as well as the check) in `services.py`. Routes pass these same lists to the templates to populate the dropdowns, so the form options and the server-side validation can never drift apart; the out-of-range message is built from the ends of `REPETITION_CHOICES` for the same reason.
+Allowed enum-like values live next to what they constrain: `FEELINGS` and `FEELING_SCORES` (bad=1, okay=2, good=3, used to plot the trend) in `models.py`; `DURATION_CHOICES` (10–90 in steps of 5), `REPETITION_CHOICES` (0–120, where 0 records an exercise that was part of the session but not done), `WEIGHT_CHOICES` (1–200) with `NO_WEIGHT` (`None`, the "no extra weight" choice), `DEFAULT_WEIGHT` = `NO_WEIGHT` and `WEIGHT_UNIT` ("kg", only ever displayed — nothing converts between units), `MIN_AGE`/`MAX_AGE` (1–120) and `MAX_COMMENT_LENGTH` (2000, the textarea's `maxlength` as well as the check) in `services.py`. Routes pass these same lists to the templates to populate the dropdowns, so the form options and the server-side validation can never drift apart; the out-of-range message is built from the ends of `REPETITION_CHOICES` for the same reason.
 
 ### Users page
 
@@ -90,17 +104,24 @@ of that field name, shared with the analytics filter.
 
 Below it, `/track` renders a `reps-<exercise id>` and a `weight-<exercise id>` dropdown for the exercises of **every** workout, in one form. A small inline script hides and `disabled`s the fieldsets of the workouts that aren't selected, so only the relevant fields are submitted. Without JS all fields are submitted, so `log_session` deliberately ignores exercise ids that don't belong to the chosen workout while requiring one entry for every exercise that does.
 
-The weight column is pre-selected at `WEIGHT_CHOICES[0]`, so leaving it alone
-records bodyweight. Unlike the repetitions the weight is **optional per
-exercise**: an id missing from `weights_by_exercise` is logged at
-`DEFAULT_WEIGHT` rather than rejected, so a hand-crafted POST without the field
-still logs a session rather than failing.
+The weight column opens on a **"none" option ahead of `WEIGHT_CHOICES`**, whose
+form value is the empty string (`NO_WEIGHT_VALUE` in `routes.py`, passed to the
+template so the option and the parser cannot drift). Leaving it alone records
+bodyweight: `_weight` in `routes.py` turns that blank into `NO_WEIGHT`, the log's
+`weight` is NULL, and the exercise is counted in repetitions alone — no weight
+moved, no share of a weight total, no best session. Unlike the repetitions the
+weight is **optional per exercise**: an id missing from `weights_by_exercise` is
+logged at `DEFAULT_WEIGHT` (= `NO_WEIGHT`) rather than rejected, so a hand-crafted
+POST without the field still logs a session rather than failing. `_check_weight`
+lets `NO_WEIGHT` through and still rejects 0, which is *not* a way to say "none".
+The success flash drops its weight clause entirely when `total_weight` is 0.
 
 Below that sits the extra-exercises fieldset: repeatable `extra-name` / `extra-reps` / `extra-weight` rows, positionally zipped, for exercises done only in this session. One empty row is rendered server-side (so it works without JS) and `addExtraExercise()` clones the `#extra-row-template` for more. Blank rows are dropped, and `log_session` rejects an extra whose name is already an exercise of the workout, or repeated twice, so nothing gets double counted.
 
 `extra_exercises` takes `(name, reps)` *or* `(name, reps, weight)` tuples, the
 weight again defaulting to `DEFAULT_WEIGHT` — which is also what a row whose
-weight field is missing gets, rather than the row being dropped along with it.
+weight field is missing, or left at "none", gets, rather than the row being
+dropped along with it.
 
 Last on the form is an optional free-text `comment` about the session. `log_session`
 strips it and stores a blank one as **NULL, not `""`**, which is what lets
@@ -142,15 +163,26 @@ Five sections, in this order (a test asserts the order):
 4. `exercise_repetitions()` — one entry per exercise, grouped **by exercise name**, so an exercise appearing in several workouts (or logged as an extra) is reported once. `workouts` names where the repetitions actually **came from** — the workouts of the sessions the exercise was logged in — not every workout that happens to contain an exercise of that name. An extra belongs to no workout, so an exercise done only as an extra lists none; otherwise doing "Squats" as an extra during Arm day would label it "Leg day" and imply a workout that was never performed. An exercise nobody has performed has no sessions to go on and falls back to the workouts it belongs to, which is the only thing there is to say about it — that is what the "Not performed yet · Leg day" caption shows. Alongside the totals (`repetitions`, `weight`, `times`, `workouts`, `extra`) each row carries `heatmap`: its own calendar grid of the last `EXERCISE_HEATMAP_DAYS` (365) days, counting repetitions per day and summing them when an exercise landed twice on one date (possible across two sessions). `heatmap` is `None` for an exercise never performed, which the template renders as "Not performed yet" with no grid. Each row also carries `trend` from **`_repetition_trend`**: it splits the exercise's own history — first performed date to last — into two equal-length halves and compares the repetitions in each, giving `direction` (`"up"`, `"down"`, `"similar"` or `None`), both half totals, the `split` date and `change` as a fraction. Within ±`REPETITION_TREND_TOLERANCE` (15%) counts as `"similar"`; `direction` is `None` when everything falls on one date, and `change` is `None` when the earlier half is 0 (no baseline to be a percentage of), which the badge renders as a direction with no percentage. The trend reads the whole history, not just the heatmap window, so an old session can shape a trend whose grid looks empty.
 
    Next to the repetitions each row carries `weight` — the weight moved over the
-   exercise's whole history, `weight_moved` summed — and `best_session`, the one
-   session that accounts for most of it, as `{"weight": int, "date": date}` (a
-   `date`, formatted in the template, the way `session_comments` carries one).
-   Grouping is **per session, not per date**: two sessions on one day compete
-   rather than being merged the way the heatmap merges them, and a weight matched
-   again is reported at the later date. `best_session` is `None` for an exercise
-   never performed, exactly as `heatmap` is, and the template drops the whole
-   clause for those rows. Both read the whole history, so a best session can
-   predate the grid it is captioning.
+   exercise's whole history, `weight_moved` summed — `weighted`, whether any set
+   carried an extra weight at all, and `best_session`, the one session that
+   accounts for most of the weight, as `{"weight": int, "date": date}` (a `date`,
+   formatted in the template, the way `session_comments` carries one). Grouping is
+   **per session, not per date**: two sessions on one day compete rather than being
+   merged the way the heatmap merges them, and a weight matched again is reported
+   at the later date. Sessions done at bodyweight are not candidates, so a best
+   session always carried something. `best_session` is `None` for an exercise never
+   performed, exactly as `heatmap` is, *and* for one never performed with a weight;
+   `weighted` is `False` for both, and the template hangs the whole weight clause —
+   "… kg moved · best session …" — off `weighted`, so an exercise only ever done at
+   bodyweight is captioned in repetitions alone rather than at 0 kg. The section's
+   "kg moved in total" stat disappears the same way when nothing was ever carried.
+   Both figures read the whole history, so a best session can predate the grid it
+   is captioning.
+
+   **Repetitions are counted the same either way**: the grouping is by exercise
+   name alone, so the same exercise done weighted one session and at bodyweight the
+   next is one row whose `repetitions` and `times` cover both, and only its
+   `weight` is restricted to the sets that carried something.
 
    The function merges five queries in Python: workout membership, linked totals,
    extra totals, and linked and extra **per session** — the last two carrying the
@@ -191,4 +223,57 @@ can be checked against a clean split. `test_services.py` and `test_analytics.py`
 ## Entry point
 
 `main.py` holds `create_app()` plus `app.run(debug=True)`. (An earlier `run.py` did this
-and is gone; don't reintroduce it.)
+and is gone; don't reintroduce it.) `app.run(debug=True)` is for local work only — the
+container serves the same `main:app` through gunicorn instead.
+
+## Configuration
+
+`create_app` builds its config from the environment, and `tests/test_config.py` covers
+every branch of it:
+
+- `APP_ENV=production` means "being served for real". The Dockerfile sets it; `python
+  main.py` and the tests do not, so neither needs a secret to keep working. It is
+  compared stripped and case-insensitively, so a stray space can't quietly disable the
+  check below.
+- `SECRET_KEY` signs the session cookie the flash messages ride in. Under
+  `APP_ENV=production` an unset key — *or* the `DEV_SECRET_KEY` (`"dev"`) baked into
+  `src/__init__.py` — raises `RuntimeError` at startup rather than serving something
+  quietly forgeable.
+- `SESSION_COOKIE_SECURE` is an opt-in flag, **off** by default on purpose: a cookie
+  marked Secure is dropped over plain HTTP, which would make flash messages vanish in
+  the default localhost deployment. `SESSION_COOKIE_HTTPONLY` and `SAMESITE=Lax` are
+  always on. `_flag` parses the booleans (`1/true/yes/on`).
+
+`test_config` still overrides everything afterwards, so the tests are unaffected.
+
+## Deployment
+
+Four files, all at the repo root: `Dockerfile`, `compose.yaml`, `gunicorn.conf.py`,
+`.dockerignore`, plus `.env.example` as the template for the gitignored `.env`.
+
+The Dockerfile is two stages. The build stage runs `uv sync --frozen --no-dev --extra
+deploy` against `uv.lock` — `--frozen` fails rather than re-resolving if the lock has
+drifted from `pyproject.toml`, so **adding a dependency means re-running `uv lock`** or
+the image build breaks. Only `/app/.venv` and the source cross into the run stage, which
+therefore ships no uv, no compiler and no pytest. Both base images are pinned by digest;
+the Dockerfile's header comment carries the two commands for reading a new one.
+
+The run stage adds a fixed uid/gid 10001 `app` user and `install -d -o app` on
+`/app/instance` — that ownership is what a named volume inherits when Docker first
+populates it, which is why the compose file uses a named volume and not a bind mount.
+Everything else in the image stays root-owned and is read-only to the process
+(`read_only: true`, with a `noexec` tmpfs for `/tmp`), so `/app/instance` is the only
+writable path and SQLite's `workouts.db` and its journal both live there.
+
+`gunicorn.conf.py` is loaded by `--config`. Two settings are load-bearing rather than
+cosmetic: `preload_app = True` so `db.create_all()` runs once before forking instead of
+once per worker racing on the same file, and `control_socket_disable = True` because
+gunicorn 26 otherwise opens a control socket under `$HOME`, which the app user does not
+have and the read-only filesystem would refuse. `forwarded_allow_ips` deliberately keeps
+gunicorn's narrow default — never widen it to `*`.
+
+Compose publishes `127.0.0.1:8000:8000`, loopback only. **The app has no authentication
+at all**, so that binding is a security control, not a formality: don't change it to
+`0.0.0.0` or add a public port. Anything remote belongs behind a reverse proxy that
+authenticates first, with `SESSION_COOKIE_SECURE=1` and `FORWARDED_ALLOW_IPS` set to
+that proxy.

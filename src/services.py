@@ -22,7 +22,8 @@ from src.models import (
 DURATION_CHOICES = list(range(10, 91, 5))  # 10-90 minutes
 REPETITION_CHOICES = list(range(0, 121))  # 0-120, 0 meaning skipped
 WEIGHT_CHOICES = list(range(1, 201))  # 1-200, the extra weight per exercise
-DEFAULT_WEIGHT = WEIGHT_CHOICES[0]  # what an unanswered weight field means: 1
+NO_WEIGHT = None  # the "no extra weight" choice: repetitions only, no load
+DEFAULT_WEIGHT = NO_WEIGHT  # what an unanswered weight field means
 WEIGHT_UNIT = "kg"  # only ever displayed; nothing converts between units
 TREND_DAYS = 30  # window of the feeling graph on the analytics page
 EXERCISE_HEATMAP_DAYS = 365  # window of each per-exercise heatmap
@@ -118,12 +119,16 @@ def known_exercise_names() -> list[str]:
 # ---------------------------------------------------------------- sessions
 
 
-def _check_weight(weight: int, exercise_name: str) -> None:
+def _check_weight(weight: int | None, exercise_name: str) -> None:
     """Reject an extra weight outside WEIGHT_CHOICES, naming the exercise.
 
-    The message is built from the ends of the list, the same one the track
-    page's dropdown is filled from, so the two cannot drift apart.
+    NO_WEIGHT passes: it is the track page's default, meaning the exercise was
+    done with no added load and counts in repetitions only. The message is
+    built from the ends of the list, the same one the track page's dropdown is
+    filled from, so the two cannot drift apart.
     """
+    if weight is NO_WEIGHT:
+        return
     if weight not in WEIGHT_CHOICES:
         raise ValidationError(
             f"Weight for '{exercise_name}' must be between "
@@ -138,9 +143,11 @@ def log_session(
     duration_minutes: int,
     repetitions_by_exercise: dict[int, int],
     feeling: str,
-    extra_exercises: list[tuple[str, int]] | list[tuple[str, int, int]] | None = None,
+    extra_exercises: (
+        list[tuple[str, int]] | list[tuple[str, int, int | None]] | None
+    ) = None,
     comment: str = "",
-    weights_by_exercise: dict[int, int] | None = None,
+    weights_by_exercise: dict[int, int | None] | None = None,
 ) -> WorkoutSession:
     """Record a performed workout by one user, exercise by exercise.
 
@@ -149,10 +156,11 @@ def log_session(
     because the track form submits fields for all workouts when JS is off.
 
     `weights_by_exercise` maps the same exercise ids to the extra weight carried
-    for those repetitions. Unlike the repetitions it is optional per exercise:
-    an id missing from it is logged at DEFAULT_WEIGHT, so a caller that does not
-    care about weight — or a form submitted without the field — records a
-    session at the lowest weight rather than failing.
+    for those repetitions, or to NO_WEIGHT for an exercise done with no added
+    load. Unlike the repetitions it is optional per exercise: an id missing from
+    it is logged at DEFAULT_WEIGHT — NO_WEIGHT — so a caller that does not care
+    about weight, or a form submitted without the field, records a session of
+    plain repetitions rather than failing.
 
     `extra_exercises` holds (name, repetitions) or (name, repetitions, weight)
     tuples for exercises done in this session only, the weight again defaulting
@@ -264,7 +272,15 @@ def _for_user(query, user_id: int | None):
 
 # The SQL twin of SessionExercise.weight_moved: the extra weight counted once
 # per repetition of it, which is what the analytics page totals as "weight".
+# NULL for a log with no extra weight, exactly as the property is None, so
+# SUM() skips those rows and a bodyweight set adds nothing to a weight total.
 _WEIGHT_MOVED = SessionExercise.repetitions * SessionExercise.weight
+
+# How many of the logs grouped here carried an extra weight. COUNT() of a
+# column ignores NULLs, so this is 0 for an exercise only ever done at
+# bodyweight — the rows whose weight figures the analytics page leaves out
+# rather than printing as 0.
+_WEIGHTED_LOGS = db.func.count(SessionExercise.weight)
 
 
 def _calendar_weeks(
@@ -456,13 +472,21 @@ def exercise_repetitions(
 
     `weight` is the weight moved across the exercise's whole history: the extra
     weight of each log counted once per repetition of it, the same figure as
-    `SessionExercise.weight_moved`. `best_session` is the single session that
-    accounts for most of it — {"weight": int, "date": a `date`, formatted in the
-    template} — or None for an exercise never performed, exactly as `heatmap` is.
-    Two sessions tied on weight are reported at the later date. Unlike `heatmap`
-    both
-    read the whole history rather than the last EXERCISE_HEATMAP_DAYS days, so a
-    best session can predate the grid it is shown above.
+    `SessionExercise.weight_moved`. Sets done with no extra weight are left out
+    of it — they are counted in `repetitions` alone — and `weighted` says
+    whether any set carried a weight at all. An exercise only ever done at
+    bodyweight has `weighted` False, `weight` 0 and `best_session` None, which
+    is what lets the page report it in repetitions only instead of captioning it
+    with a weight of 0.
+
+    `best_session` is the single session that accounts for most of the weight —
+    {"weight": int, "date": a `date`, formatted in the template} — or None for
+    an exercise never performed or never weighted, much as `heatmap` is None for
+    one never performed. Sessions with no extra weight are not candidates, so
+    the best session is always a session that actually carried something. Two
+    sessions tied on weight are reported at the later date. Unlike `heatmap`
+    both read the whole history rather than the last EXERCISE_HEATMAP_DAYS days,
+    so a best session can predate the grid it is shown above.
 
     `trend` says whether its repetitions are going up, down or holding steady;
     see `_repetition_trend`. It reads the exercise's whole history, not just the
@@ -492,6 +516,7 @@ def exercise_repetitions(
                 "name": name,
                 "repetitions": 0,
                 "weight": 0,
+                "weighted": False,
                 "times": 0,
                 "workouts": [],
                 "extra": False,
@@ -536,6 +561,7 @@ def exercise_repetitions(
                 db.func.sum(SessionExercise.repetitions),
                 db.func.sum(_WEIGHT_MOVED),
                 db.func.count(SessionExercise.id),
+                _WEIGHTED_LOGS,
             )
             .join(SessionExercise, SessionExercise.exercise_id == Exercise.id)
             .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id),
@@ -544,11 +570,12 @@ def exercise_repetitions(
         .group_by(Exercise.name)
         .all()
     )
-    for name, reps, weight, times in logged:
+    for name, reps, weight, times, weighted in logged:
         row = bucket(name)
         row["repetitions"] += int(reps or 0)
         row["weight"] += int(weight or 0)
         row["times"] += times
+        row["weighted"] = row["weighted"] or bool(weighted)
 
     # Extras carry their own name instead of pointing at an exercise row.
     extras = (
@@ -558,6 +585,7 @@ def exercise_repetitions(
                 db.func.sum(SessionExercise.repetitions),
                 db.func.sum(_WEIGHT_MOVED),
                 db.func.count(SessionExercise.id),
+                _WEIGHTED_LOGS,
             )
             .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id)
             .filter(SessionExercise.exercise_id.is_(None)),
@@ -566,17 +594,20 @@ def exercise_repetitions(
         .group_by(SessionExercise.extra_name)
         .all()
     )
-    for name, reps, weight, times in extras:
+    for name, reps, weight, times, weighted in extras:
         row = bucket(name)
         row["repetitions"] += int(reps or 0)
         row["weight"] += int(weight or 0)
         row["times"] += times
+        row["weighted"] = row["weighted"] or bool(weighted)
         row["extra"] = True
 
     # One row per session an exercise was logged in, which gives both the
     # repetitions per date the heatmap and the trend are drawn from — summed
     # when an exercise landed twice on one day, possible across two sessions —
-    # and the weight per session the best one is picked out of.
+    # and the weight per session the best one is picked out of. That weight is
+    # NULL for a session done with no extra weight, which is what keeps such a
+    # session out of the running for `best_session`.
     per_date: dict[str, dict[date_type, int]] = {}
     best: dict[str, tuple[int, date_type, int]] = {}
     linked_sessions = (
@@ -614,9 +645,11 @@ def exercise_repetitions(
     for name, day, session_id, reps, weight in linked_sessions + extra_sessions:
         dates = per_date.setdefault(name, {})
         dates[day] = dates.get(day, 0) + int(reps or 0)
+        if weight is None:
+            continue  # bodyweight: repetitions only, nothing to be best at
         # Compared as a tuple, so a weight matched again is reported at the
         # later date rather than the first time it was reached.
-        candidate = (int(weight or 0), day, session_id)
+        candidate = (int(weight), day, session_id)
         if candidate > best.get(name, (-1,)):
             best[name] = candidate
 
@@ -624,8 +657,9 @@ def exercise_repetitions(
         row = bucket(name)
         row["heatmap"] = _calendar_weeks(dates, end, EXERCISE_HEATMAP_DAYS)
         row["trend"] = _repetition_trend(dates)
-        weight, day, _ = best[name]
-        row["best_session"] = {"weight": weight, "date": day}
+        if name in best:  # absent for an exercise only ever done at bodyweight
+            weight, day, _ = best[name]
+            row["best_session"] = {"weight": weight, "date": day}
 
     for name, row in buckets.items():
         # Where the repetitions came from, or — for an exercise nobody has done

@@ -9,6 +9,12 @@ dependencies = [
     "flask-sqlalchemy>=3.1",
 ]
 
+[project.optional-dependencies]
+# Only the container needs these: the dev server in main.py does not.
+deploy = [
+    "gunicorn>=23.0",
+]
+
 
 [dependency-groups]
 dev = [

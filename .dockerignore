@@ -1,0 +1,31 @@
+# Everything the image does not need, and everything it must never carry.
+# The build only wants pyproject.toml, uv.lock, main.py and src/.
+
+# The live database. Copying it into an image would bake real training data
+# into every layer and every copy of that image — the container gets an empty
+# volume instead.
+instance/
+
+.git/
+.gitignore
+.dockerignore
+.venv/
+__pycache__/
+*.py[oc]
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Tests and their config: pytest is a dev dependency and is not installed.
+tests/
+pytest.ini
+
+# Docs and deployment files, none of which the running app reads.
+README.md
+CLAUDE.md
+Dockerfile
+compose.yaml
+.env
+.env.*
+!.env.example

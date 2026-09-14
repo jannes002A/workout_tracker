@@ -1,3 +1,5 @@
 flask>=3.0
 flask-sqlalchemy>=3.1
 pytest>=8.0
+# The `deploy` extra in pyproject.toml — the WSGI server the container runs.
+gunicorn>=23.0

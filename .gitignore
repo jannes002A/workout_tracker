@@ -11,3 +11,8 @@ wheels/
 
 # Database
 instance/
+
+# Secrets for the container (SECRET_KEY). .env.example is the template.
+.env
+.env.*
+!.env.example

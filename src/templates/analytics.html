@@ -155,11 +155,15 @@
 
 <section>
   <h2>Repetitions per exercise</h2>
-  <p class="lede">{% if user %}Every exercise {{ user.name }} has performed{% else %}Every exercise across all of your workouts{% endif %}, and how many repetitions you did of it on each day of the last 12 months. The weight moved is the extra weight of each set counted once per repetition of it, so a heavy set of few repetitions and a light set of many are comparable. Each exercise is shaded against its own busiest day. The trend splits an exercise's history in half and compares the repetitions in each, so it says whether you are doing more of it, less of it, or about the same.</p>
+  <p class="lede">{% if user %}Every exercise {{ user.name }} has performed{% else %}Every exercise across all of your workouts{% endif %}, and how many repetitions you did of it on each day of the last 12 months. Repetitions are counted the same whether or not you carried extra weight. Where you did, the weight moved is the extra weight of each set counted once per repetition of it, so a heavy set of few repetitions and a light set of many are comparable; an exercise you only ever did at bodyweight is reported in repetitions alone. Each exercise is shaded against its own busiest day. The trend splits an exercise's history in half and compares the repetitions in each, so it says whether you are doing more of it, less of it, or about the same.</p>
   {% if exercises %}
+    {%- set weighted_rows = exercises | selectattr('weighted') | list %}
     <div class="stat-row">
       <p class="big-stat">{{ exercises | sum(attribute='repetitions') }} <span>repetitions in total</span></p>
-      <p class="big-stat">{{ exercises | sum(attribute='weight') }} <span>{{ weight_unit }} moved in total</span></p>
+      {#- nothing carried extra weight, so there is no weight to total #}
+      {% if weighted_rows %}
+        <p class="big-stat">{{ exercises | sum(attribute='weight') }} <span>{{ weight_unit }} moved in total</span></p>
+      {% endif %}
     </div>
     {{ heatmap_legend() }}
     {% for row in exercises %}
@@ -170,10 +174,13 @@
           {%- if row.heatmap %}
             {{ row.repetitions }} repetition{{ '' if row.repetitions == 1 else 's' }}
             across {{ row.times }} session{{ '' if row.times == 1 else 's' }}
+            {#- done at bodyweight throughout: repetitions are the whole story #}
+            {%- if row.weighted %}
             · {{ row.weight }} {{ weight_unit }} moved
             {#- the best session can predate the grid below, which only spans a year #}
             · best session {{ row.best_session.weight }} {{ weight_unit }}
             on {{ row.best_session.date.strftime('%d %b %Y') }}
+            {%- endif %}
             · best day {{ row.heatmap.max }} repetition{{ '' if row.heatmap.max == 1 else 's' }}
           {%- else %}
             Not performed yet

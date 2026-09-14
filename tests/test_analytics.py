@@ -150,6 +150,7 @@ def test_exercise_repetitions_includes_never_performed_exercises(app):
             "name": "Plank",
             "repetitions": 0,
             "weight": 0,
+            "weighted": False,
             "times": 0,
             "workouts": ["Core day"],
             "extra": False,
@@ -259,10 +260,86 @@ def test_exercise_repetitions_totals_the_weight_moved(app, weighted):
     assert row_for("Squat")["weight"] == 200 + 400 + 150
 
 
-def test_exercise_repetitions_weight_defaults_to_one_per_repetition(app, seeded):
-    """Nothing in `seeded` picks a weight, so the totals mirror the repetitions."""
+def test_exercise_repetitions_weight_is_zero_without_an_extra_weight(app, seeded):
+    """Nothing in `seeded` picks a weight, so there is no weight to report."""
     for row in services.exercise_repetitions(end=date(2026, 9, 8)):
-        assert row["weight"] == row["repetitions"]
+        assert row["weight"] == 0
+        assert row["weighted"] is False
+        assert row["best_session"] is None
+        assert row["repetitions"] > 0  # the repetitions are counted all the same
+
+
+def test_exercise_repetitions_marks_a_weighted_exercise(app, weighted):
+    assert row_for("Squat")["weighted"] is True
+
+
+def test_exercise_repetitions_sums_weighted_and_bodyweight_repetitions(app, user):
+    """The same exercise done with and without a weight is one row."""
+    workout = services.create_workout("Leg day", ["Squat"])
+    exercise_id = workout.exercises[0].id
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {exercise_id: 10}, "good",
+        weights_by_exercise={exercise_id: 40},
+    )
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 3), 45, {exercise_id: 25}, "good",
+        weights_by_exercise={exercise_id: services.NO_WEIGHT},
+    )
+    row = row_for("Squat")
+    assert row["repetitions"] == 35  # both sessions
+    assert row["times"] == 2
+    assert row["weight"] == 400  # but only the weighted one moved anything
+    assert row["weighted"] is True
+    assert row["best_session"] == {"weight": 400, "date": date(2026, 9, 1)}
+
+
+def test_exercise_repetitions_bodyweight_only_has_no_weight_figures(app, user):
+    """Never carried anything, so the page has repetitions alone to report."""
+    workout = services.create_workout("Core day", ["Plank"])
+    exercise_id = workout.exercises[0].id
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {exercise_id: 30}, "good",
+        weights_by_exercise={exercise_id: services.NO_WEIGHT},
+    )
+    row = row_for("Plank")
+    assert row["repetitions"] == 30
+    assert row["times"] == 1
+    assert row["weight"] == 0
+    assert row["weighted"] is False
+    assert row["best_session"] is None
+    assert row["heatmap"] is not None  # it was performed, so it still gets a grid
+
+
+def test_exercise_repetitions_bodyweight_extra_has_no_weight_figures(app, user):
+    workout = services.create_workout("Arm day", ["Push ups"])
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 3), 45,
+        {workout.exercises[0].id: 10}, "good",
+        extra_exercises=[("Pull-up", 8)],
+    )
+    pull_up = row_for("Pull-up")
+    assert pull_up["repetitions"] == 8
+    assert pull_up["weight"] == 0
+    assert pull_up["weighted"] is False
+    assert pull_up["best_session"] is None
+
+
+def test_exercise_repetitions_best_session_skips_bodyweight_sessions(app, user):
+    """A session that carried nothing never wins, whatever its repetitions."""
+    workout = services.create_workout("Leg day", ["Squat"])
+    exercise_id = workout.exercises[0].id
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {exercise_id: 5}, "good",
+        weights_by_exercise={exercise_id: 10},
+    )
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 5), 45, {exercise_id: 100}, "good",
+        weights_by_exercise={exercise_id: services.NO_WEIGHT},
+    )
+    assert row_for("Squat")["best_session"] == {
+        "weight": 50,
+        "date": date(2026, 9, 1),
+    }
 
 
 def test_exercise_repetitions_best_session_is_the_heaviest_one(app, weighted):
@@ -333,6 +410,7 @@ def test_exercise_never_performed_has_no_best_session(app):
     services.create_workout("Core day", ["Plank"])
     row = row_for("Plank")
     assert row["weight"] == 0
+    assert row["weighted"] is False
     assert row["best_session"] is None
 
 

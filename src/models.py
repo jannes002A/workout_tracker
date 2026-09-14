@@ -75,8 +75,12 @@ class WorkoutSession(db.Model):
 
     @property
     def total_weight(self) -> int:
-        """Weight moved across every exercise performed in this session."""
-        return sum(log.weight_moved for log in self.logs)
+        """Weight moved across every exercise performed in this session.
+
+        Exercises done with no extra weight contribute nothing, so a session of
+        bodyweight exercises alone totals 0.
+        """
+        return sum(log.weight_moved or 0 for log in self.logs)
 
     def __repr__(self) -> str:
         return (
@@ -92,9 +96,11 @@ class SessionExercise(db.Model):
     carries the name of an extra exercise done in this session only — added on
     the track page without becoming part of the workout template.
 
-    `weight` is the extra weight carried for those repetitions. It is always
-    set — an exercise done with no added load is logged at the lowest choice,
-    1 — so `weight_moved` can be summed without special-casing.
+    `weight` is the extra weight carried for those repetitions, and is NULL
+    when there was none — a bodyweight exercise, which is what the track page
+    pre-selects. A NULL weight is not a weight of 0: it means the exercise
+    counts in repetitions only, and it is left out of every weight figure on
+    the analytics page rather than being totalled as nothing.
     """
 
     id = db.Column(db.Integer, primary_key=True)
@@ -104,7 +110,7 @@ class SessionExercise(db.Model):
     exercise_id = db.Column(db.Integer, db.ForeignKey("exercise.id"))
     extra_name = db.Column(db.String(120))  # set only when exercise_id is None
     repetitions = db.Column(db.Integer, nullable=False)  # 0-120
-    weight = db.Column(db.Integer, nullable=False, default=1)  # 1-200, extra load
+    weight = db.Column(db.Integer)  # 1-200, or NULL for no extra weight
 
     @property
     def is_extra(self) -> bool:
@@ -116,14 +122,23 @@ class SessionExercise(db.Model):
         return self.extra_name if self.is_extra else self.exercise.name
 
     @property
-    def weight_moved(self) -> int:
-        """The extra weight, once per repetition of it.
+    def has_weight(self) -> bool:
+        """True when an extra weight was carried, False for bodyweight."""
+        return self.weight is not None
+
+    @property
+    def weight_moved(self) -> int | None:
+        """The extra weight, once per repetition of it, or None without one.
 
         This is what the analytics page reports as an exercise's total weight,
         so a heavy set of few repetitions and a light set of many are
-        comparable. An exercise logged at 0 repetitions moved nothing, whatever
-        weight was picked for it.
+        comparable. It is None — not 0 — for an exercise done with no extra
+        weight, so such a set is reported in repetitions alone instead of
+        counting as nothing moved. An exercise logged at 0 repetitions moved
+        nothing, whatever weight was picked for it.
         """
+        if self.weight is None:
+            return None
         return self.repetitions * self.weight
 
     def __repr__(self) -> str:

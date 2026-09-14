@@ -7,6 +7,7 @@ from src.models import FEELINGS
 from src.services import (
     DEFAULT_WEIGHT,
     DURATION_CHOICES,
+    NO_WEIGHT,
     MAX_AGE,
     MAX_COMMENT_LENGTH,
     MIN_AGE,
@@ -23,6 +24,7 @@ WEIGHT_FIELD_PREFIX = "weight-"  # and one for its extra weight: weight-<id>
 EXTRA_NAME_FIELD = "extra-name"  # repeatable row of fields for the exercises
 EXTRA_REPS_FIELD = "extra-reps"  # done in this session only
 EXTRA_WEIGHT_FIELD = "extra-weight"
+NO_WEIGHT_VALUE = ""  # the weight dropdown's "no extra weight" option
 USER_FIELD = "user_id"  # picks the user on /track, filters /analytics
 COMMENT_FIELD = "comment"  # the session's free-text note
 
@@ -87,27 +89,33 @@ def _repetitions_from_form(form) -> dict[int, int]:
     return _by_exercise_id(form, REPS_FIELD_PREFIX)
 
 
-def _weights_from_form(form) -> dict[int, int]:
+def _weights_from_form(form) -> dict[int, int | None]:
     """Read the per-exercise `weight-<exercise id>` fields off a submitted form.
 
     An exercise with no field of its own is simply absent, which `log_session`
-    reads as the default weight rather than as an error.
+    reads as the default weight rather than as an error. A field left at the
+    dropdown's "no extra weight" option maps to NO_WEIGHT, the same thing.
     """
-    return _by_exercise_id(form, WEIGHT_FIELD_PREFIX)
+    return _by_exercise_id(form, WEIGHT_FIELD_PREFIX, _weight)
 
 
-def _by_exercise_id(form, prefix: str) -> dict[int, int]:
-    """Collect the `<prefix><exercise id>` fields into an exercise id -> int map."""
+def _weight(raw: str) -> int | None:
+    """Parse one weight field: NO_WEIGHT for the blank "no extra weight" option."""
+    return NO_WEIGHT if raw.strip() == NO_WEIGHT_VALUE else int(raw)
+
+
+def _by_exercise_id(form, prefix: str, parse=int) -> dict[int, int]:
+    """Collect the `<prefix><exercise id>` fields into an exercise id -> value map."""
     values = {}
     for key, value in form.items():
         if not key.startswith(prefix):
             continue
         exercise_id = int(key.removeprefix(prefix))
-        values[exercise_id] = int(value)
+        values[exercise_id] = parse(value)
     return values
 
 
-def _extra_exercises_from_form(form) -> list[tuple[str, int, int]]:
+def _extra_exercises_from_form(form) -> list[tuple[str, int, int | None]]:
     """Read the repeatable extra-exercise rows: a name, reps and weight each.
 
     The name and reps lists are zipped positionally. Weights are read by the
@@ -124,7 +132,7 @@ def _extra_exercises_from_form(form) -> list[tuple[str, int, int]]:
         (
             name,
             int(value),
-            int(weights[i]) if i < len(weights) else DEFAULT_WEIGHT,
+            _weight(weights[i]) if i < len(weights) else DEFAULT_WEIGHT,
         )
         for i, (name, value) in enumerate(zip(names, reps))
         if name.strip()
@@ -147,11 +155,17 @@ def track():
                 extra_exercises=_extra_exercises_from_form(request.form),
                 comment=request.form.get(COMMENT_FIELD, ""),
             )
+            # A session of nothing but bodyweight exercises has no weight to
+            # report, so it is summed up in repetitions alone.
+            moved = (
+                f", {session.total_weight} {WEIGHT_UNIT}"
+                if session.total_weight
+                else ""
+            )
             flash(
                 f"Logged {session.workout.name} for {session.user.name} on "
                 f"{session.date.isoformat()} "
-                f"({session.total_repetitions} repetitions, "
-                f"{session.total_weight} {WEIGHT_UNIT}).",
+                f"({session.total_repetitions} repetitions{moved}).",
                 "success",
             )
             return redirect(url_for("main.track"))
@@ -166,6 +180,7 @@ def track():
         durations=DURATION_CHOICES,
         repetitions=REPETITION_CHOICES,
         weights=WEIGHT_CHOICES,
+        no_weight_value=NO_WEIGHT_VALUE,
         weight_unit=WEIGHT_UNIT,
         feelings=FEELINGS,
         reps_prefix=REPS_FIELD_PREFIX,

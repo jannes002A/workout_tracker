@@ -1,7 +1,7 @@
 import re
 from datetime import date, timedelta
 
-from src import services
+from src import routes, services
 from src.models import SessionExercise, User, Workout, WorkoutSession
 
 
@@ -143,8 +143,8 @@ def flat(html: str) -> str:
 def track_form(workout, user, reps, weights=None, **overrides):
     """POST data for /track: a reps- and a weight- field per exercise.
 
-    `weights` defaults to the lowest weight for every exercise, the way the
-    form's own dropdowns are pre-selected.
+    `weights` defaults to the "no extra weight" option for every exercise, the
+    way the form's own dropdowns are pre-selected.
     """
     data = {
         "workout_id": workout.id,
@@ -153,7 +153,7 @@ def track_form(workout, user, reps, weights=None, **overrides):
         "duration": "45",
         "feeling": "good",
     }
-    weights = weights if weights is not None else [1] * len(reps)
+    weights = weights if weights is not None else [routes.NO_WEIGHT_VALUE] * len(reps)
     data.update({f"reps-{m.id}": str(v) for m, v in zip(workout.exercises, reps)})
     data.update({f"weight-{m.id}": str(v) for m, v in zip(workout.exercises, weights)})
     data.update(overrides)
@@ -322,9 +322,10 @@ def test_track_page_offers_a_weight_dropdown_per_exercise(client, app, user):
     for exercise_id in ids:
         assert f'name="weight-{exercise_id}"' in html
     assert 'name="extra-weight"' in html
-    # the ends of WEIGHT_CHOICES, and the lowest one pre-selected
-    assert f'value="{services.WEIGHT_CHOICES[0]}" selected' in html
+    # the ends of WEIGHT_CHOICES, behind "no extra weight" as the pre-selected one
+    assert f'value="{services.WEIGHT_CHOICES[0]}"' in html
     assert f'value="{services.WEIGHT_CHOICES[-1]}"' in html
+    assert f'value="{routes.NO_WEIGHT_VALUE}" selected' in html
     assert f"extra {services.WEIGHT_UNIT}" in html
 
 
@@ -344,14 +345,39 @@ def test_track_session_records_the_weight_via_form(client, app, user):
 
 
 def test_track_session_without_weight_fields_uses_the_default(client, app, user):
-    """A hand-crafted POST that skips them still logs, at the lowest weight."""
+    """A hand-crafted POST that skips them still logs, with no extra weight."""
     with app.app_context():
         workout = services.create_workout("Leg day", ["Squat"])
         data = track_form(workout, user, (30,))
         del data[f"weight-{workout.exercises[0].id}"]
     client.post("/track", data=data, follow_redirects=True)
     with app.app_context():
-        assert SessionExercise.query.one().weight == services.DEFAULT_WEIGHT
+        assert SessionExercise.query.one().weight is services.DEFAULT_WEIGHT
+
+
+def test_track_session_records_no_extra_weight_via_form(client, app, user):
+    """The dropdown's "none" option, which is what it opens on."""
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        data = track_form(workout, user, (30,))
+    response = client.post("/track", data=data, follow_redirects=True)
+    # the flash reports repetitions alone; there is no weight to mention
+    assert b"30 repetitions)" in response.data
+    with app.app_context():
+        assert SessionExercise.query.one().weight is None
+
+
+def test_track_session_extra_exercise_without_extra_weight_via_form(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        data = track_form(workout, user, (30,))
+        data["extra-name"] = "Pull-up"
+        data["extra-reps"] = "12"
+        data["extra-weight"] = routes.NO_WEIGHT_VALUE
+    client.post("/track", data=data, follow_redirects=True)
+    with app.app_context():
+        pull_up = SessionExercise.query.filter_by(extra_name="Pull-up").one()
+        assert pull_up.weight is None
 
 
 def test_track_session_out_of_range_weight_shows_error(client, app, user):
@@ -391,7 +417,7 @@ def test_track_session_weights_several_extra_exercises_by_position(client, app, 
     with app.app_context():
         session = WorkoutSession.query.one()
         assert {log.name: log.weight for log in session.logs} == {
-            "Squat": 1,
+            "Squat": None,
             "Pull-up": 15,
             "Dip": 20,
         }
@@ -807,6 +833,50 @@ def test_analytics_page_shows_the_weight_moved_per_exercise(client, app, user):
         < caption.index(f"600 {unit} moved")
         < caption.index("best session")
     )
+
+
+def test_analytics_page_reports_a_bodyweight_exercise_in_repetitions_alone(
+    client, app, user
+):
+    """Nothing was carried, so there is no weight clause and no total to show."""
+    with app.app_context():
+        workout = services.create_workout("Core day", ["Plank"])
+        services.log_session(
+            workout.id, user.id, date(2026, 9, 1), 45,
+            {workout.exercises[0].id: 30}, "good",
+        )
+    html = client.get("/analytics").data.decode()
+    section = html[html.index("Repetitions per exercise") :]
+    start = section.index('class="chart-caption"')
+    caption = flat(section[start : section.index("</p>", start)])
+    assert "30 repetitions across 1 session" in caption
+    assert f"{services.WEIGHT_UNIT} moved" not in caption
+    assert "best session" not in caption
+    assert f"{services.WEIGHT_UNIT} moved in total" not in section
+    assert "30 <span>repetitions in total</span>" in section
+
+
+def test_analytics_page_keeps_the_weight_total_when_anything_was_carried(
+    client, app, user
+):
+    """One weighted exercise alongside a bodyweight one still totals a weight."""
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat", "Plank"])
+        squat, plank = (m.id for m in workout.exercises)
+        services.log_session(
+            workout.id, user.id, date(2026, 9, 1), 45, {squat: 10, plank: 30},
+            "good", weights_by_exercise={squat: 20},
+        )
+    html = client.get("/analytics").data.decode()
+    section = html[html.index("Repetitions per exercise") :]
+    unit = services.WEIGHT_UNIT
+    assert f"200 <span>{unit} moved in total</span>" in section
+    plank_block = section[section.index("<h3>Plank") :]
+    plank_caption = flat(
+        plank_block[: plank_block.index("</p>", plank_block.index("chart-caption"))]
+    )
+    assert f"{unit} moved" not in plank_caption
+    assert "best session" not in plank_caption
 
 
 def test_analytics_page_says_nothing_about_weight_for_an_unperformed_exercise(

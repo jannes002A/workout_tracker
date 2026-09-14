@@ -2,12 +2,14 @@
 {% block title %}Track session · Training Log{% endblock %}
 
 {# The weight dropdown, rendered next to every repetition dropdown. The
-   options come from the same list the service validates against, and the
-   first one — the lowest weight — is the default. #}
+   options come from the same list the service validates against, ahead of
+   the "no extra weight" choice — the default, which records the exercise in
+   repetitions alone and leaves it out of every weight figure. #}
 {% macro weight_select(name, label, id=none) %}
   <select {% if id %}id="{{ id }}" {% endif %}name="{{ name }}" aria-label="{{ label }}">
+    <option value="{{ no_weight_value }}" selected>none</option>
     {% for w in weights %}
-      <option value="{{ w }}" {% if loop.first %}selected{% endif %}>{{ w }}</option>
+      <option value="{{ w }}">{{ w }}</option>
     {% endfor %}
   </select>
 {% endmacro %}
@@ -29,7 +31,7 @@
 
 {% block content %}
 <h1>Track a session</h1>
-<p class="lede">Pick who trained and which workout they did, then record how many repetitions they did of each of its exercises, and how much extra weight they carried ({{ weight_unit }}) — leave it at {{ weights[0] }} for bodyweight.</p>
+<p class="lede">Pick who trained and which workout they did, then record how many repetitions they did of each of its exercises, and how much extra weight they carried ({{ weight_unit }}) — leave it at <em>none</em> for bodyweight, and the exercise is counted in repetitions only, with no weight moved.</p>
 
 {% if not users %}
   <p class="empty">You need a user first — <a href="{{ url_for('main.users') }}">add one</a>, then come back to track their sessions.</p>
@@ -96,8 +98,8 @@
   <fieldset class="extra-exercises">
     <legend>Extra exercises — this session only</legend>
     <p class="hint">Did something that isn't part of the workout? Add it here with its
-    repetitions and extra weight. It counts towards your analytics but is not added to
-    the workout.</p>
+    repetitions and extra weight (<em>none</em> for bodyweight). It counts towards your
+    analytics but is not added to the workout.</p>
     <div class="extra-row column-heads" aria-hidden="true">
       <span>exercise</span><span>reps</span><span>extra {{ weight_unit }}</span><span></span>
     </div>
