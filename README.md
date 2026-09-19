@@ -143,10 +143,12 @@ Log a session someone has done:
 | Workout | any workout you've created |
 | Date | today or any of the previous 30 days |
 | Length | 10–90 minutes, in 5-minute steps |
-| Repetitions | 0–120, **entered separately for every exercise of the workout** (0 = part of the session but not done) |
+| How repetitions are counted | a total per exercise, or sets × repetitions per set |
+| Sets | 1–20, per exercise, asked for only when counting in sets |
+| Repetitions | 0–120, **entered separately for every exercise of the workout** (0 = part of the session but not done) — the total when counting totals, the repetitions of one set when counting in sets |
 | Extra kg | **none** or 1–200, also per exercise — the extra weight carried for those repetitions. It opens on *none*: leave it there for a bodyweight exercise and it is counted in repetitions only, with no weight moved |
 | Feeling | good, okay or bad |
-| Extra exercises | any number of one-off exercises with their own repetitions and weight |
+| Extra exercises | any number of one-off exercises with their own sets, repetitions and weight |
 | Comment | an optional free-text note about the session, up to 2000 characters |
 
 The page asks for the user first, and says so instead of showing a form when
@@ -154,14 +156,23 @@ there is no user yet — the same way it already did for workouts.
 
 Choosing a workout reveals its exercises, each with its own repetition and
 weight dropdown, so the session records what was actually done per exercise
-rather than a single lump total. The weight dropdown starts at **none** — pick a
+rather than a single lump total.
+
+The dropdown at the top of the form decides how those repetitions are counted.
+**Total repetitions per exercise** is the default and asks for one figure per
+exercise. **Sets × repetitions per set** adds a sets column: give each exercise
+its number of sets and the repetitions of one of them, and the two are multiplied
+into what is logged — 4 sets of 10 squats is 40 repetitions. The sets are per
+exercise, so squats can be 4×10 in the same session lunges are 3×12, and the
+analytics read the multiplied figure, so both ways of counting land in the same
+totals. The weight dropdown starts at **none** — pick a
 number only when you actually carried something. An exercise left at *none* still
 counts every repetition; it simply has no weight to report, and never shows up as
 0 kg moved.
 
 Did something that isn't part of the workout? **Add another exercise** under
-"Extra exercises" records it with its repetitions and weight for this session
-only. It counts towards the analytics like any other exercise, but it is *not*
+"Extra exercises" records it with its sets, repetitions and weight for this
+session only. It counts towards the analytics like any other exercise, but it is *not*
 added to the workout, so the next session won't ask for it. An extra can't
 repeat an exercise the workout already has — set that exercise's repetitions
 instead — and can't be listed twice in one session.

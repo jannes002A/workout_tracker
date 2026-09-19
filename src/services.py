@@ -24,6 +24,19 @@ REPETITION_CHOICES = list(range(0, 121))  # 0-120, 0 meaning skipped
 WEIGHT_CHOICES = list(range(1, 201))  # 1-200, the extra weight per exercise
 NO_WEIGHT = None  # the "no extra weight" choice: repetitions only, no load
 DEFAULT_WEIGHT = NO_WEIGHT  # what an unanswered weight field means
+SET_CHOICES = list(range(1, 21))  # 1-20 sets of an exercise within a session
+NO_SETS = None  # the repetitions given are already the exercise's total
+DEFAULT_SETS = NO_SETS  # what an unanswered sets field means
+# How the track page counts a session, picked from a dropdown at the top of the
+# form: value -> the label the dropdown shows for it. Counting in sets asks for
+# the repetitions of one set per exercise and multiplies them by its sets; the
+# two come out at the same place, the repetitions logged for that exercise.
+TOTAL_MODE, SETS_MODE = "total", "sets"
+TRACKING_MODES = {
+    TOTAL_MODE: "Total repetitions per exercise",
+    SETS_MODE: "Sets × repetitions per set",
+}
+DEFAULT_TRACKING_MODE = TOTAL_MODE
 WEIGHT_UNIT = "kg"  # only ever displayed; nothing converts between units
 TREND_DAYS = 30  # window of the feeling graph on the analytics page
 EXERCISE_HEATMAP_DAYS = 365  # window of each per-exercise heatmap
@@ -136,6 +149,32 @@ def _check_weight(weight: int | None, exercise_name: str) -> None:
         )
 
 
+def _check_sets(sets: int | None, exercise_name: str) -> None:
+    """Reject a number of sets outside SET_CHOICES, naming the exercise.
+
+    NO_SETS passes: it means the session was counted as a total per exercise
+    rather than in sets, which is the track page's default. The message is
+    built from the ends of the list the dropdown is filled from, so the two
+    cannot drift apart.
+    """
+    if sets is NO_SETS:
+        return
+    if sets not in SET_CHOICES:
+        raise ValidationError(
+            f"Sets for '{exercise_name}' must be between "
+            f"{SET_CHOICES[0]} and {SET_CHOICES[-1]}."
+        )
+
+
+def _performed(repetitions: int, sets: int | None) -> int:
+    """The repetitions actually performed, which is what gets logged.
+
+    Counted as a total, that is the figure given. Counted in sets, the figure
+    is the repetitions of one set and the sets multiply it.
+    """
+    return repetitions if sets is NO_SETS else repetitions * sets
+
+
 def log_session(
     workout_id: int,
     user_id: int,
@@ -144,10 +183,14 @@ def log_session(
     repetitions_by_exercise: dict[int, int],
     feeling: str,
     extra_exercises: (
-        list[tuple[str, int]] | list[tuple[str, int, int | None]] | None
+        list[tuple[str, int]]
+        | list[tuple[str, int, int | None]]
+        | list[tuple[str, int, int | None, int | None]]
+        | None
     ) = None,
     comment: str = "",
     weights_by_exercise: dict[int, int | None] | None = None,
+    sets_by_exercise: dict[int, int | None] | None = None,
 ) -> WorkoutSession:
     """Record a performed workout by one user, exercise by exercise.
 
@@ -162,11 +205,20 @@ def log_session(
     about weight, or a form submitted without the field, records a session of
     plain repetitions rather than failing.
 
-    `extra_exercises` holds (name, repetitions) or (name, repetitions, weight)
-    tuples for exercises done in this session only, the weight again defaulting
-    to DEFAULT_WEIGHT. They are logged against the session without being added
-    to the workout, so they never show up on the track form again. Tuples with a
-    blank name are dropped, so an untouched row on the form is simply ignored.
+    `sets_by_exercise` maps those same exercise ids to the number of sets the
+    exercise was done in, which is what the track page's "sets" mode collects.
+    An exercise with a number of sets has its `repetitions_by_exercise` figure
+    read as the repetitions of *one* set, and the two are multiplied into the
+    repetitions logged; NO_SETS — the default for an id missing from the map,
+    and for every exercise when the session is counted as a total — logs the
+    figure as it stands.
+
+    `extra_exercises` holds (name, repetitions), (name, repetitions, weight) or
+    (name, repetitions, weight, sets) tuples for exercises done in this session
+    only, the weight and sets again defaulting to DEFAULT_WEIGHT and
+    DEFAULT_SETS. They are logged against the session without being added to the
+    workout, so they never show up on the track form again. Tuples with a blank
+    name are dropped, so an untouched row on the form is simply ignored.
 
     `comment` is a free-text note about the session. It is stripped, and a blank
     one is stored as NULL rather than an empty string, so `session_comments` can
@@ -191,6 +243,7 @@ def log_session(
 
     provided = repetitions_by_exercise or {}
     weights = weights_by_exercise or {}
+    sets_of = sets_by_exercise or {}
     logs = []
     for exercise in workout.exercises:
         if exercise.id not in provided:
@@ -201,11 +254,16 @@ def log_session(
                 f"Repetitions for '{exercise.name}' must be between "
                 f"{REPETITION_CHOICES[0]} and {REPETITION_CHOICES[-1]}."
             )
+        sets = sets_of.get(exercise.id, DEFAULT_SETS)
+        _check_sets(sets, exercise.name)
         weight = weights.get(exercise.id, DEFAULT_WEIGHT)
         _check_weight(weight, exercise.name)
         logs.append(
             SessionExercise(
-                exercise_id=exercise.id, repetitions=reps, weight=weight
+                exercise_id=exercise.id,
+                repetitions=_performed(reps, sets),
+                sets=sets,
+                weight=weight,
             )
         )
 
@@ -214,6 +272,7 @@ def log_session(
     for entry in extra_exercises or []:
         name, reps = entry[0], entry[1]
         weight = entry[2] if len(entry) > 2 else DEFAULT_WEIGHT
+        sets = entry[3] if len(entry) > 3 else DEFAULT_SETS
         name = (name or "").strip()
         if not name:
             continue  # an untouched extra-exercise row on the form
@@ -229,10 +288,16 @@ def log_session(
                 f"Repetitions for '{name}' must be between "
                 f"{REPETITION_CHOICES[0]} and {REPETITION_CHOICES[-1]}."
             )
+        _check_sets(sets, name)
         _check_weight(weight, name)
         seen_extras.add(name.casefold())
         logs.append(
-            SessionExercise(extra_name=name, repetitions=reps, weight=weight)
+            SessionExercise(
+                extra_name=name,
+                repetitions=_performed(reps, sets),
+                sets=sets,
+                weight=weight,
+            )
         )
 
     session = WorkoutSession(

@@ -31,7 +31,8 @@ will fail. (`SessionExercise.weight` was added that way — an `instance/workout
 predating it needs its `session_exercise` table dropped. It later became
 `nullable=True` for the "no extra weight" option, which SQLite will not relax
 in place either: a database carrying the old `weight INTEGER NOT NULL` rejects
-every bodyweight log until that table is dropped or rebuilt.)
+every bodyweight log until that table is dropped or rebuilt. `SessionExercise.sets`
+arrived the same way and wants the same table dropped.)
 
 ## Architecture
 
@@ -61,12 +62,22 @@ same rows, which `SUM()` then skips — so the Python property and the queries c
 drift. `_WEIGHTED_LOGS` alongside it is `COUNT(weight)`, 0 for an exercise only ever
 done at bodyweight, which is what the `weighted` flag on an analytics row comes from.
 
+`SessionExercise.repetitions` is always the repetitions **actually performed**,
+whichever way the track page counted them, and `sets` says how they were split
+up: NULL for a session counted as a total per exercise, or the number of sets
+the repetitions were done in. `_performed` in `services.py` is what multiplies
+them — the repetitions given alongside a number of sets are the repetitions of
+*one* set. `tracked_in_sets` and `repetitions_per_set` (an exact division, since
+the total is the product) read it back. Nothing in analytics knows about sets:
+they change what goes into `repetitions`, never how it is reported, which is
+why counting in sets needed no query touched.
+
 A `SessionExercise` is one of two things, which `is_extra` distinguishes and the `name` property papers over:
 
 - `exercise_id` set — an exercise of the workout template.
 - `exercise_id` NULL and `extra_name` set — an **extra exercise**, done in that session only. It is logged and analysed like any other exercise but deliberately creates no `Exercise` row, so it never joins the workout and is not asked for again next session.
 
-Allowed enum-like values live next to what they constrain: `FEELINGS` and `FEELING_SCORES` (bad=1, okay=2, good=3, used to plot the trend) in `models.py`; `DURATION_CHOICES` (10–90 in steps of 5), `REPETITION_CHOICES` (0–120, where 0 records an exercise that was part of the session but not done), `WEIGHT_CHOICES` (1–200) with `NO_WEIGHT` (`None`, the "no extra weight" choice), `DEFAULT_WEIGHT` = `NO_WEIGHT` and `WEIGHT_UNIT` ("kg", only ever displayed — nothing converts between units), `MIN_AGE`/`MAX_AGE` (1–120) and `MAX_COMMENT_LENGTH` (2000, the textarea's `maxlength` as well as the check) in `services.py`. Routes pass these same lists to the templates to populate the dropdowns, so the form options and the server-side validation can never drift apart; the out-of-range message is built from the ends of `REPETITION_CHOICES` for the same reason.
+Allowed enum-like values live next to what they constrain: `FEELINGS` and `FEELING_SCORES` (bad=1, okay=2, good=3, used to plot the trend) in `models.py`; `DURATION_CHOICES` (10–90 in steps of 5), `REPETITION_CHOICES` (0–120, where 0 records an exercise that was part of the session but not done), `WEIGHT_CHOICES` (1–200) with `NO_WEIGHT` (`None`, the "no extra weight" choice), `DEFAULT_WEIGHT` = `NO_WEIGHT` and `WEIGHT_UNIT` ("kg", only ever displayed — nothing converts between units), `SET_CHOICES` (1–20) with `NO_SETS` (`None`, "these repetitions are already the total") and `DEFAULT_SETS` = `NO_SETS`, `TRACKING_MODES` (value → dropdown label, `TOTAL_MODE` and `SETS_MODE`) with `DEFAULT_TRACKING_MODE` = `TOTAL_MODE`, `MIN_AGE`/`MAX_AGE` (1–120) and `MAX_COMMENT_LENGTH` (2000, the textarea's `maxlength` as well as the check) in `services.py`. Routes pass these same lists to the templates to populate the dropdowns, so the form options and the server-side validation can never drift apart; the out-of-range message is built from the ends of `REPETITION_CHOICES` for the same reason.
 
 ### Users page
 
@@ -102,7 +113,25 @@ one, so the page renders "You need a user first" (and no form at all) until a us
 the same way it already did for workouts. `USER_FIELD` in `routes.py` is the single source
 of that field name, shared with the analytics filter.
 
-Below it, `/track` renders a `reps-<exercise id>` and a `weight-<exercise id>` dropdown for the exercises of **every** workout, in one form. A small inline script hides and `disabled`s the fieldsets of the workouts that aren't selected, so only the relevant fields are submitted. Without JS all fields are submitted, so `log_session` deliberately ignores exercise ids that don't belong to the chosen workout while requiring one entry for every exercise that does.
+Below it sits the **counting mode** — a `tracking_mode` dropdown offering
+`TRACKING_MODES`, at the top of the form because it changes what every field
+under it means. Counting a *total* (the default) the repetitions dropdown carries
+the whole figure for the exercise; counting in *sets* each exercise also gets a
+`sets-<exercise id>` dropdown and its repetitions are the repetitions of one set,
+the two multiplying into what is logged. The number of sets is **per exercise**,
+so 4×10 squats and 3×12 lunges belong to the same session.
+
+`_tracking_mode` in `routes.py` reads the field, falling back to
+`DEFAULT_TRACKING_MODE` for anything the dropdown cannot have produced, and
+`_sets_from_form` returns `{}` outside sets mode — a browser without JS submits
+the sets column regardless, so the mode, not the presence of the fields, is what
+decides. The repetitions are validated **per set**, against `REPETITION_CHOICES`
+as before, so 20 sets of 120 is a legitimate 2400-repetition entry even though no
+dropdown offers that number. A small script hides and `disabled`s the sets column
+for a total (the `hide-sets` class in `style.css` closes the row's grid back up
+over it) and relabels the reps column "reps / set" in sets mode.
+
+Below that, `/track` renders a `reps-<exercise id>` and a `weight-<exercise id>` dropdown for the exercises of **every** workout, in one form. A small inline script hides and `disabled`s the fieldsets of the workouts that aren't selected, so only the relevant fields are submitted. Without JS all fields are submitted, so `log_session` deliberately ignores exercise ids that don't belong to the chosen workout while requiring one entry for every exercise that does.
 
 The weight column opens on a **"none" option ahead of `WEIGHT_CHOICES`**, whose
 form value is the empty string (`NO_WEIGHT_VALUE` in `routes.py`, passed to the
@@ -118,16 +147,18 @@ The success flash drops its weight clause entirely when `total_weight` is 0.
 
 Below that sits the extra-exercises fieldset: repeatable `extra-name` / `extra-reps` / `extra-weight` rows, positionally zipped, for exercises done only in this session. One empty row is rendered server-side (so it works without JS) and `addExtraExercise()` clones the `#extra-row-template` for more. Blank rows are dropped, and `log_session` rejects an extra whose name is already an exercise of the workout, or repeated twice, so nothing gets double counted.
 
-`extra_exercises` takes `(name, reps)` *or* `(name, reps, weight)` tuples, the
-weight again defaulting to `DEFAULT_WEIGHT` — which is also what a row whose
-weight field is missing, or left at "none", gets, rather than the row being
-dropped along with it.
+`extra_exercises` takes `(name, reps)`, `(name, reps, weight)` *or*
+`(name, reps, weight, sets)` tuples, the weight and sets again defaulting to
+`DEFAULT_WEIGHT` and `DEFAULT_SETS` — which is also what a row whose weight field
+is missing, or left at "none", gets, rather than the row being dropped along with
+it. An extra row carries a sets dropdown like any other exercise, read only in
+sets mode.
 
 Last on the form is an optional free-text `comment` about the session. `log_session`
 strips it and stores a blank one as **NULL, not `""`**, which is what lets
 `session_comments` select the sessions that actually have something to say.
 
-`_repetitions_from_form`, `_weights_from_form` (both over the shared `_by_exercise_id`) and `_extra_exercises_from_form` in `routes.py` do the field parsing; `REPS_FIELD_PREFIX`, `WEIGHT_FIELD_PREFIX`, `EXTRA_NAME_FIELD`, `EXTRA_REPS_FIELD`, `EXTRA_WEIGHT_FIELD`, `USER_FIELD` and `COMMENT_FIELD` are the single source of the field-name conventions.
+`_repetitions_from_form`, `_weights_from_form`, `_sets_from_form` (all three over the shared `_by_exercise_id`) and `_extra_exercises_from_form` in `routes.py` do the field parsing; `REPS_FIELD_PREFIX`, `WEIGHT_FIELD_PREFIX`, `SETS_FIELD_PREFIX`, `EXTRA_NAME_FIELD`, `EXTRA_REPS_FIELD`, `EXTRA_WEIGHT_FIELD`, `EXTRA_SETS_FIELD`, `MODE_FIELD`, `USER_FIELD` and `COMMENT_FIELD` are the single source of the field-name conventions.
 
 ### Analytics page
 

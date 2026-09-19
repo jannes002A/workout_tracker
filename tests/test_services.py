@@ -765,6 +765,195 @@ def test_session_total_weight_is_zero_without_any_extra_weight(app, workout, use
     assert session.total_weight == 0
 
 
+# --------------------------------------------------------- log_session: sets
+
+
+def sets_for(workout, *values):
+    """Build an exercise id -> number of sets mapping in exercise order."""
+    return {m.id: v for m, v in zip(workout.exercises, values)}
+
+
+def test_log_session_multiplies_the_sets_by_the_repetitions_per_set(app, workout, user):
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 10, 12),  # per set, because sets are given
+        "good",
+        sets_by_exercise=sets_for(workout, 4, 3),
+    )
+    assert {log.name: log.repetitions for log in session.logs} == {
+        "Squat": 40,  # 4 x 10
+        "Lunge": 36,  # 3 x 12
+    }
+    assert session.total_repetitions == 76
+
+
+def test_log_session_records_the_sets_it_counted_in(app, workout, user):
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 10, 12),
+        "good",
+        sets_by_exercise=sets_for(workout, 4, 3),
+    )
+    squat = next(log for log in session.logs if log.name == "Squat")
+    assert squat.sets == 4
+    assert squat.tracked_in_sets is True
+    assert squat.repetitions_per_set == 10
+
+
+def test_log_session_without_sets_takes_the_repetitions_as_the_total(app, workout, user):
+    session = services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good"
+    )
+    assert [log.repetitions for log in session.logs] == [30, 20]
+    assert [log.sets for log in session.logs] == [None, None]
+    assert [log.tracked_in_sets for log in session.logs] == [False, False]
+    assert [log.repetitions_per_set for log in session.logs] == [None, None]
+    assert services.DEFAULT_SETS is services.NO_SETS
+
+
+def test_log_session_defaults_a_missing_sets_entry_to_no_sets(app, workout, user):
+    """The sets are optional per exercise, the way the weight is."""
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 10, 20),
+        "good",
+        sets_by_exercise={workout.exercises[0].id: 4},
+    )
+    assert {log.name: log.repetitions for log in session.logs} == {
+        "Squat": 40,  # 4 x 10
+        "Lunge": 20,  # a total, as given
+    }
+
+
+def test_log_session_counts_sets_of_zero_repetitions_as_nothing_done(app, workout, user):
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 10, 0),
+        "good",
+        sets_by_exercise=sets_for(workout, 4, 3),
+    )
+    lunge = next(log for log in session.logs if log.name == "Lunge")
+    assert lunge.repetitions == 0
+    assert lunge.repetitions_per_set == 0
+
+
+@pytest.mark.parametrize("sets", [0, -1, 21, 100])
+def test_log_session_invalid_sets(app, workout, user, sets):
+    with pytest.raises(ValidationError, match="between 1 and 20"):
+        services.log_session(
+            workout.id,
+            user.id,
+            date.today(),
+            45,
+            reps_for(workout, 10, 12),
+            "good",
+            sets_by_exercise=sets_for(workout, 4, sets),
+        )
+    assert WorkoutSession.query.count() == 0
+
+
+def test_log_session_invalid_sets_names_the_exercise(app, workout, user):
+    with pytest.raises(ValidationError, match="Sets for 'Lunge'"):
+        services.log_session(
+            workout.id,
+            user.id,
+            date.today(),
+            45,
+            reps_for(workout, 10, 12),
+            "good",
+            sets_by_exercise=sets_for(workout, 4, 0),
+        )
+
+
+def test_log_session_checks_the_repetitions_of_one_set_not_the_total(app, workout, user):
+    """20 sets of 120 is far past the dropdown's top figure, and still valid."""
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 120, 120),
+        "good",
+        sets_by_exercise=sets_for(workout, 20, 20),
+    )
+    assert session.total_repetitions == 4800
+
+
+def test_log_session_records_the_sets_of_an_extra_exercise(app, workout, user):
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 30, 20),
+        "good",
+        extra_exercises=[("Pull-up", 8, services.NO_WEIGHT, 3)],
+    )
+    pull_up = next(log for log in session.logs if log.name == "Pull-up")
+    assert pull_up.repetitions == 24  # 3 x 8
+    assert pull_up.sets == 3
+
+
+def test_log_session_extra_exercise_without_sets_keeps_its_repetitions(app, workout, user):
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 30, 20),
+        "good",
+        extra_exercises=[("Pull-up", 8, 5)],
+    )
+    pull_up = next(log for log in session.logs if log.name == "Pull-up")
+    assert pull_up.repetitions == 8
+    assert pull_up.sets is None
+
+
+def test_log_session_invalid_sets_on_an_extra_exercise(app, workout, user):
+    with pytest.raises(ValidationError, match="Sets for 'Pull-up'"):
+        services.log_session(
+            workout.id,
+            user.id,
+            date.today(),
+            45,
+            reps_for(workout, 30, 20),
+            "good",
+            extra_exercises=[("Pull-up", 8, services.NO_WEIGHT, 21)],
+        )
+    assert WorkoutSession.query.count() == 0
+
+
+def test_weight_moved_counts_every_repetition_of_every_set(app, workout, user):
+    """The sets are already multiplied in, so the weight follows the total."""
+    session = services.log_session(
+        workout.id,
+        user.id,
+        date(2026, 9, 1),
+        45,
+        reps_for(workout, 10, 12),
+        "good",
+        weights_by_exercise=weights_for(workout, 60, services.NO_WEIGHT),
+        sets_by_exercise=sets_for(workout, 4, 3),
+    )
+    assert {log.name: log.weight_moved for log in session.logs} == {
+        "Squat": 2400,  # 4 sets x 10 repetitions x 60 kg
+        "Lunge": None,
+    }
+    assert session.total_weight == 2400
+
+
 def test_date_choices_span_and_order():
     today = date(2026, 9, 8)
     choices = services.date_choices(days_back=30, today=today)
@@ -779,6 +968,21 @@ def test_duration_and_repetition_choices_bounds():
     assert services.REPETITION_CHOICES[0] == 0
     assert services.REPETITION_CHOICES[-1] == 120
     assert len(services.REPETITION_CHOICES) == 121
+
+
+def test_set_choices_bounds_and_default():
+    assert services.SET_CHOICES[0] == 1
+    assert services.SET_CHOICES[-1] == 20
+    assert len(services.SET_CHOICES) == 20
+    assert services.NO_SETS is None
+    assert services.NO_SETS not in services.SET_CHOICES
+    assert services.DEFAULT_SETS is services.NO_SETS
+
+
+def test_tracking_modes_offer_a_total_and_sets(app):
+    assert services.DEFAULT_TRACKING_MODE == services.TOTAL_MODE
+    assert set(services.TRACKING_MODES) == {services.TOTAL_MODE, services.SETS_MODE}
+    assert all(label for label in services.TRACKING_MODES.values())
 
 
 def test_weight_choices_bounds_and_default():

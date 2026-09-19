@@ -14,10 +14,22 @@
   </select>
 {% endmacro %}
 
+{# The sets dropdown, rendered ahead of every repetition dropdown. It only
+   applies when the session is counted in sets — the script below hides and
+   disables the column otherwise, and the server ignores it either way. #}
+{% macro sets_select(name, label, id=none) %}
+  <select {% if id %}id="{{ id }}" {% endif %}class="sets-cell" name="{{ name }}" aria-label="{{ label }}">
+    {% for s in set_choices %}
+      <option value="{{ s }}" {% if s == 3 %}selected{% endif %}>{{ s }}</option>
+    {% endfor %}
+  </select>
+{% endmacro %}
+
 {% macro extra_row() %}
   <div class="extra-row">
     <input name="{{ extra_name_field }}" type="text" placeholder="e.g. Pull-up"
            aria-label="Extra exercise">
+    {{ sets_select(extra_sets_field, "Sets") }}
     <select name="{{ extra_reps_field }}" aria-label="Repetitions">
       {% for r in repetitions %}
         <option value="{{ r }}" {% if r == 10 %}selected{% endif %}>{{ r }}</option>
@@ -31,14 +43,14 @@
 
 {% block content %}
 <h1>Track a session</h1>
-<p class="lede">Pick who trained and which workout they did, then record how many repetitions they did of each of its exercises, and how much extra weight they carried ({{ weight_unit }}) — leave it at <em>none</em> for bodyweight, and the exercise is counted in repetitions only, with no weight moved.</p>
+<p class="lede">Pick who trained and which workout they did, then record how many repetitions they did of each of its exercises — as a total, or as sets of so many repetitions each — and how much extra weight they carried ({{ weight_unit }}) — leave it at <em>none</em> for bodyweight, and the exercise is counted in repetitions only, with no weight moved.</p>
 
 {% if not users %}
   <p class="empty">You need a user first — <a href="{{ url_for('main.users') }}">add one</a>, then come back to track their sessions.</p>
 {% elif not workouts %}
   <p class="empty">You need a workout first — <a href="{{ url_for('main.create') }}">create one</a>, then come back to track it.</p>
 {% else %}
-<form method="post" class="panel">
+<form method="post" class="panel" id="track-form">
   <label for="{{ user_field }}">Who did it?</label>
   <select id="{{ user_field }}" name="{{ user_field }}" required>
     {% for u in users %}
@@ -52,6 +64,15 @@
       <option value="{{ w.id }}">{{ w.name }}</option>
     {% endfor %}
   </select>
+
+  <label for="{{ mode_field }}">How are repetitions counted?</label>
+  <select id="{{ mode_field }}" name="{{ mode_field }}">
+    {% for value, label in tracking_modes.items() %}
+      <option value="{{ value }}" {% if value == default_tracking_mode %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <p class="hint">Counted in sets, each exercise gets a number of sets and the
+  repetitions of one of them; the two multiply into the repetitions logged.</p>
 
   <div class="field-row">
     <div>
@@ -76,11 +97,16 @@
     <fieldset class="exercise-reps" data-workout="{{ w.id }}">
       <legend>Repetitions — {{ w.name }}</legend>
       <div class="exercise-row column-heads" aria-hidden="true">
-        <span></span><span>reps</span><span>extra {{ weight_unit }}</span>
+        <span></span><span class="sets-cell">sets</span>
+        <span class="reps-head">reps</span><span>extra {{ weight_unit }}</span>
       </div>
       {% for m in w.exercises %}
         <div class="exercise-row">
           <label for="{{ reps_prefix }}{{ m.id }}">{{ m.name }}</label>
+          {{ sets_select(
+               sets_prefix ~ m.id,
+               "Sets of " ~ m.name,
+               id=sets_prefix ~ m.id) }}
           <select id="{{ reps_prefix }}{{ m.id }}" name="{{ reps_prefix }}{{ m.id }}">
             {% for r in repetitions %}
               <option value="{{ r }}" {% if r == 10 %}selected{% endif %}>{{ r }}</option>
@@ -101,7 +127,8 @@
     repetitions and extra weight (<em>none</em> for bodyweight). It counts towards your
     analytics but is not added to the workout.</p>
     <div class="extra-row column-heads" aria-hidden="true">
-      <span>exercise</span><span>reps</span><span>extra {{ weight_unit }}</span><span></span>
+      <span>exercise</span><span class="sets-cell">sets</span>
+      <span class="reps-head">reps</span><span>extra {{ weight_unit }}</span><span></span>
     </div>
     <div id="extra-list">{{ extra_row() }}</div>
     <button type="button" class="ghost" onclick="addExtraExercise()">Add another exercise</button>
@@ -134,7 +161,24 @@ function addExtraExercise() {
   const row = template.content.cloneNode(true);
   const list = document.getElementById('extra-list');
   list.appendChild(row);
+  syncTrackingMode();  // a fresh row starts with its sets dropdown enabled
   list.lastElementChild.querySelector('input').focus();
+}
+
+// The sets column only means anything when the session is counted in sets, so
+// hide it and disable its dropdowns for a total, keeping them out of the
+// submission. Without JS both columns show and the server ignores the sets
+// fields unless the dropdown at the top asked for them.
+function syncTrackingMode() {
+  const form = document.getElementById('track-form');
+  const inSets = document.getElementById('{{ mode_field }}').value === '{{ sets_mode }}';
+  form.classList.toggle('hide-sets', !inSets);
+  for (const select of form.querySelectorAll('select.sets-cell')) {
+    select.disabled = !inSets;
+  }
+  for (const head of form.querySelectorAll('.reps-head')) {
+    head.textContent = inSets ? 'reps / set' : 'reps';
+  }
 }
 
 // Show only the exercises of the selected workout. Disabling a fieldset keeps
@@ -153,6 +197,10 @@ function addExtraExercise() {
   select.addEventListener('change', sync);
   sync();
 })();
+
+document.getElementById('{{ mode_field }}')
+  .addEventListener('change', syncTrackingMode);
+syncTrackingMode();
 </script>
 {% endif %}
 {% endblock %}

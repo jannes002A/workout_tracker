@@ -101,6 +101,13 @@ class SessionExercise(db.Model):
     pre-selects. A NULL weight is not a weight of 0: it means the exercise
     counts in repetitions only, and it is left out of every weight figure on
     the analytics page rather than being totalled as nothing.
+
+    `repetitions` is always the repetitions actually performed, whichever way
+    the track page counted them. `sets` says how they were split up: NULL when
+    the session was counted as a total per exercise, or the number of sets the
+    repetitions were done in, `repetitions` then being that many equal sets.
+    Analytics read `repetitions` alone, so counting in sets changes what goes
+    into the total, never how it is reported.
     """
 
     id = db.Column(db.Integer, primary_key=True)
@@ -109,7 +116,8 @@ class SessionExercise(db.Model):
     )
     exercise_id = db.Column(db.Integer, db.ForeignKey("exercise.id"))
     extra_name = db.Column(db.String(120))  # set only when exercise_id is None
-    repetitions = db.Column(db.Integer, nullable=False)  # 0-120
+    repetitions = db.Column(db.Integer, nullable=False)  # performed in total
+    sets = db.Column(db.Integer)  # 1-20, or NULL when counted as a total
     weight = db.Column(db.Integer)  # 1-200, or NULL for no extra weight
 
     @property
@@ -120,6 +128,22 @@ class SessionExercise(db.Model):
     @property
     def name(self) -> str:
         return self.extra_name if self.is_extra else self.exercise.name
+
+    @property
+    def tracked_in_sets(self) -> bool:
+        """True when this exercise was counted in sets rather than as a total."""
+        return self.sets is not None
+
+    @property
+    def repetitions_per_set(self) -> int | None:
+        """The repetitions of one set, or None when counted as a total.
+
+        `repetitions` is the number of sets multiplied by this, so the division
+        is exact.
+        """
+        if self.sets is None:
+            return None
+        return self.repetitions // self.sets
 
     @property
     def has_weight(self) -> bool:
@@ -144,5 +168,5 @@ class SessionExercise(db.Model):
     def __repr__(self) -> str:
         return (
             f"<SessionExercise {self.name} reps={self.repetitions} "
-            f"weight={self.weight}>"
+            f"sets={self.sets} weight={self.weight}>"
         )

@@ -170,11 +170,17 @@ button.ghost:hover { border-style: solid; }
 .exercise-reps legend { font-weight: 700; font-size: 0.9rem; padding: 0 0.35rem; }
 .exercise-row {
   display: grid;
-  grid-template-columns: 1fr 7rem 7rem;
+  grid-template-columns: 1fr 5rem 7rem 7rem;
   align-items: center;
   gap: 0.75rem;
 }
 .exercise-row label { margin-top: 0; font-weight: 400; }
+
+/* Counting a session as a total leaves the sets column with nothing to say, so
+   the track page drops it and the rows close back up over it. */
+.hide-sets .sets-cell { display: none; }
+.hide-sets .exercise-row { grid-template-columns: 1fr 7rem 7rem; }
+.hide-sets .extra-row { grid-template-columns: 1fr 7rem 7rem auto; }
 
 /* The "reps" / "extra kg" headings above the dropdown columns, sharing the
    row's own grid so they stay over the right column. */
@@ -196,8 +202,17 @@ button.ghost:hover { border-style: solid; }
 .extra-exercises .hint { color: var(--ink-soft); font-size: 0.85rem; margin: 0.35rem 0 0.75rem; max-width: 55ch; }
 .extra-exercises button { margin-top: 0.75rem; }
 #extra-list { display: flex; flex-direction: column; gap: 0.5rem; }
-.extra-row { display: grid; grid-template-columns: 1fr 7rem 7rem auto; align-items: center; gap: 0.75rem; }
-.extra-row button { margin-top: 0; padding: 0.45rem 0.8rem; font-size: 0.85rem; }
+.extra-row { display: grid; grid-template-columns: 1fr 5rem 7rem 7rem auto; align-items: center; gap: 0.75rem; }
+/* Remove sits in the row with the input and the dropdowns, so it drops the
+   base button's top margin and its flex-start alignment and stretches to the
+   row's height instead — the box lines up with the ones beside it, top and
+   bottom, rather than floating shorter than them. */
+.extra-row button {
+  margin-top: 0;
+  align-self: stretch;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.85rem;
+}
 
 /* --- analytics --- */
 .heatmap-wrap { overflow-x: auto; padding: 0.5rem 0; }

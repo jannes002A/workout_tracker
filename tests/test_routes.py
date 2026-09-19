@@ -140,11 +140,15 @@ def flat(html: str) -> str:
     return " ".join(html.split())
 
 
-def track_form(workout, user, reps, weights=None, **overrides):
+def track_form(workout, user, reps, weights=None, sets=None, **overrides):
     """POST data for /track: a reps- and a weight- field per exercise.
 
     `weights` defaults to the "no extra weight" option for every exercise, the
     way the form's own dropdowns are pre-selected.
+
+    `sets` adds a sets- field per exercise and switches the mode dropdown over
+    to counting in sets, which makes `reps` the repetitions of one set. Left
+    out, the form counts totals, the way it opens.
     """
     data = {
         "workout_id": workout.id,
@@ -152,10 +156,14 @@ def track_form(workout, user, reps, weights=None, **overrides):
         "date": "2026-09-01",
         "duration": "45",
         "feeling": "good",
+        routes.MODE_FIELD: services.TOTAL_MODE,
     }
     weights = weights if weights is not None else [routes.NO_WEIGHT_VALUE] * len(reps)
     data.update({f"reps-{m.id}": str(v) for m, v in zip(workout.exercises, reps)})
     data.update({f"weight-{m.id}": str(v) for m, v in zip(workout.exercises, weights)})
+    if sets is not None:
+        data[routes.MODE_FIELD] = services.SETS_MODE
+        data.update({f"sets-{m.id}": str(v) for m, v in zip(workout.exercises, sets)})
     data.update(overrides)
     return data
 
@@ -300,6 +308,84 @@ def test_track_session_with_several_extra_exercises_via_form(client, app, user):
             "Pull-up": 12,
             "Dip": 8,
         }
+
+
+def test_track_page_offers_the_two_ways_of_counting(client, app, user):
+    with app.app_context():
+        services.create_workout("Leg day", ["Squat"])
+    html = client.get("/track").data.decode()
+    assert f'name="{routes.MODE_FIELD}"' in html
+    for value, label in services.TRACKING_MODES.items():
+        assert f'value="{value}"' in html
+        assert label in html
+    assert 'name="sets-' in html
+    assert f'name="{routes.EXTRA_SETS_FIELD}"' in html
+    assert 'value="20"' in html  # the top of the sets dropdown
+
+
+def test_track_session_in_sets_logs_sets_times_repetitions(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat", "Lunge"])
+        data = track_form(workout, user, (10, 12), sets=(4, 3))
+    response = client.post("/track", data=data, follow_redirects=True)
+    assert b"76 repetitions" in response.data  # 4 x 10 + 3 x 12
+    with app.app_context():
+        session = WorkoutSession.query.one()
+        assert {log.name: (log.repetitions, log.sets) for log in session.logs} == {
+            "Squat": (40, 4),
+            "Lunge": (36, 3),
+        }
+
+
+def test_track_session_counting_a_total_ignores_the_sets_fields(client, app, user):
+    """Without JS the disabled sets column is submitted anyway; it must not count."""
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        data = track_form(workout, user, (30,))
+        data[f"sets-{workout.exercises[0].id}"] = "4"
+    response = client.post("/track", data=data, follow_redirects=True)
+    assert b"30 repetitions" in response.data
+    with app.app_context():
+        log = SessionExercise.query.one()
+        assert (log.repetitions, log.sets) == (30, None)
+
+
+def test_track_session_with_an_unknown_mode_counts_a_total(client, app, user):
+    """Only a hand-crafted POST can say anything else; it falls back, not fails."""
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        data = track_form(workout, user, (30,), sets=(4,))
+        data[routes.MODE_FIELD] = "pyramid"
+    client.post("/track", data=data, follow_redirects=True)
+    with app.app_context():
+        assert SessionExercise.query.one().repetitions == 30
+
+
+def test_track_session_in_sets_with_an_extra_exercise(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        data = track_form(workout, user, (10,), sets=(4,))
+        data[routes.EXTRA_NAME_FIELD] = "Pull-up"
+        data[routes.EXTRA_REPS_FIELD] = "8"
+        data[routes.EXTRA_SETS_FIELD] = "3"
+    response = client.post("/track", data=data, follow_redirects=True)
+    assert b"64 repetitions" in response.data  # 4 x 10 + 3 x 8
+    with app.app_context():
+        session = WorkoutSession.query.one()
+        assert {log.name: (log.repetitions, log.sets) for log in session.logs} == {
+            "Squat": (40, 4),
+            "Pull-up": (24, 3),
+        }
+
+
+def test_track_session_with_an_impossible_sets_count_shows_error(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        data = track_form(workout, user, (10,), sets=(0,))
+    response = client.post("/track", data=data)
+    assert b"Sets for &#39;Squat&#39; must be between 1 and 20." in response.data
+    with app.app_context():
+        assert WorkoutSession.query.count() == 0
 
 
 def test_track_session_extra_already_in_workout_shows_error(client, app, user):

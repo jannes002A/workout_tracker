@@ -5,6 +5,8 @@ from flask import Blueprint, flash, redirect, render_template, request, url_for
 from src import services
 from src.models import FEELINGS
 from src.services import (
+    DEFAULT_SETS,
+    DEFAULT_TRACKING_MODE,
     DEFAULT_WEIGHT,
     DURATION_CHOICES,
     NO_WEIGHT,
@@ -12,6 +14,9 @@ from src.services import (
     MAX_COMMENT_LENGTH,
     MIN_AGE,
     REPETITION_CHOICES,
+    SET_CHOICES,
+    SETS_MODE,
+    TRACKING_MODES,
     WEIGHT_CHOICES,
     WEIGHT_UNIT,
     ValidationError,
@@ -21,9 +26,12 @@ bp = Blueprint("main", __name__)
 
 REPS_FIELD_PREFIX = "reps-"  # one field per exercise: reps-<exercise id>
 WEIGHT_FIELD_PREFIX = "weight-"  # and one for its extra weight: weight-<id>
+SETS_FIELD_PREFIX = "sets-"  # and one for its sets: sets-<id>, in sets mode
 EXTRA_NAME_FIELD = "extra-name"  # repeatable row of fields for the exercises
 EXTRA_REPS_FIELD = "extra-reps"  # done in this session only
 EXTRA_WEIGHT_FIELD = "extra-weight"
+EXTRA_SETS_FIELD = "extra-sets"
+MODE_FIELD = "tracking_mode"  # counts the session in totals or in sets
 NO_WEIGHT_VALUE = ""  # the weight dropdown's "no extra weight" option
 USER_FIELD = "user_id"  # picks the user on /track, filters /analytics
 COMMENT_FIELD = "comment"  # the session's free-text note
@@ -115,24 +123,56 @@ def _by_exercise_id(form, prefix: str, parse=int) -> dict[int, int]:
     return values
 
 
-def _extra_exercises_from_form(form) -> list[tuple[str, int, int | None]]:
-    """Read the repeatable extra-exercise rows: a name, reps and weight each.
+def _tracking_mode(form) -> str:
+    """Which way the form counted the session, from the dropdown at its top.
 
-    The name and reps lists are zipped positionally. Weights are read by the
-    same position but run out gracefully: a row with no weight field of its own
-    is logged at DEFAULT_WEIGHT, the same fallback `log_session` applies to a
-    exercise missing from `weights_by_exercise`. Rows left blank are dropped
-    here so an untouched row never reaches the service (and so its unused
-    number fields can't fail to parse).
+    Anything the dropdown cannot have produced — only reachable by a
+    hand-crafted POST — falls back to DEFAULT_TRACKING_MODE, the way an unknown
+    user id on the analytics page falls back to "All users".
+    """
+    mode = form.get(MODE_FIELD, "").strip()
+    return mode if mode in TRACKING_MODES else DEFAULT_TRACKING_MODE
+
+
+def _sets_from_form(form) -> dict[int, int | None]:
+    """Read the per-exercise `sets-<exercise id>` fields off a submitted form.
+
+    Only in sets mode. Counting a session in totals, the repetitions dropdown
+    already carries the whole figure for the exercise, so the sets fields — which
+    a browser without JS submits all the same — are ignored, exactly as the
+    fields of the workouts that weren't picked are.
+    """
+    if _tracking_mode(form) != SETS_MODE:
+        return {}
+    return _by_exercise_id(form, SETS_FIELD_PREFIX)
+
+
+def _extra_exercises_from_form(form) -> list[tuple[str, int, int | None, int | None]]:
+    """Read the repeatable extra-exercise rows: a name, reps, weight and sets.
+
+    The name and reps lists are zipped positionally. Weights and sets are read
+    by the same position but run out gracefully: a row with no field of its own
+    is logged at DEFAULT_WEIGHT and DEFAULT_SETS, the same fallbacks
+    `log_session` applies to an exercise missing from `weights_by_exercise` or
+    `sets_by_exercise`. The sets are read only in sets mode, like the ones of
+    the workout's own exercises. Rows left blank are dropped here so an
+    untouched row never reaches the service (and so its unused number fields
+    can't fail to parse).
     """
     names = form.getlist(EXTRA_NAME_FIELD)
     reps = form.getlist(EXTRA_REPS_FIELD)
     weights = form.getlist(EXTRA_WEIGHT_FIELD)
+    sets = (
+        form.getlist(EXTRA_SETS_FIELD)
+        if _tracking_mode(form) == SETS_MODE
+        else []
+    )
     return [
         (
             name,
             int(value),
             _weight(weights[i]) if i < len(weights) else DEFAULT_WEIGHT,
+            int(sets[i]) if i < len(sets) else DEFAULT_SETS,
         )
         for i, (name, value) in enumerate(zip(names, reps))
         if name.strip()
@@ -151,6 +191,7 @@ def track():
                 duration_minutes=int(request.form.get("duration", 0)),
                 repetitions_by_exercise=_repetitions_from_form(request.form),
                 weights_by_exercise=_weights_from_form(request.form),
+                sets_by_exercise=_sets_from_form(request.form),
                 feeling=request.form.get("feeling", ""),
                 extra_exercises=_extra_exercises_from_form(request.form),
                 comment=request.form.get(COMMENT_FIELD, ""),
@@ -180,14 +221,21 @@ def track():
         durations=DURATION_CHOICES,
         repetitions=REPETITION_CHOICES,
         weights=WEIGHT_CHOICES,
+        set_choices=SET_CHOICES,
         no_weight_value=NO_WEIGHT_VALUE,
+        tracking_modes=TRACKING_MODES,
+        default_tracking_mode=DEFAULT_TRACKING_MODE,
+        sets_mode=SETS_MODE,
+        mode_field=MODE_FIELD,
         weight_unit=WEIGHT_UNIT,
         feelings=FEELINGS,
         reps_prefix=REPS_FIELD_PREFIX,
         weight_prefix=WEIGHT_FIELD_PREFIX,
+        sets_prefix=SETS_FIELD_PREFIX,
         extra_name_field=EXTRA_NAME_FIELD,
         extra_reps_field=EXTRA_REPS_FIELD,
         extra_weight_field=EXTRA_WEIGHT_FIELD,
+        extra_sets_field=EXTRA_SETS_FIELD,
         comment_field=COMMENT_FIELD,
         max_comment_length=MAX_COMMENT_LENGTH,
     )
