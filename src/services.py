@@ -9,6 +9,8 @@ from datetime import date as date_type
 from datetime import timedelta
 
 from src.models import (
+    CATEGORIES,
+    DEFAULT_CATEGORY,
     FEELING_SCORES,
     FEELINGS,
     Exercise,
@@ -191,6 +193,7 @@ def log_session(
     comment: str = "",
     weights_by_exercise: dict[int, int | None] | None = None,
     sets_by_exercise: dict[int, int | None] | None = None,
+    category: str = DEFAULT_CATEGORY,
 ) -> WorkoutSession:
     """Record a performed workout by one user, exercise by exercise.
 
@@ -223,6 +226,13 @@ def log_session(
     `comment` is a free-text note about the session. It is stripped, and a blank
     one is stored as NULL rather than an empty string, so `session_comments` can
     pick out the sessions that actually have something to say.
+
+    `category` is the sort of sport the session was, one of CATEGORIES. It
+    describes the whole session rather than any one exercise, which is why the
+    track page asks for it at the very top of the form, and it is what the
+    activity map colours a day by. It defaults to DEFAULT_CATEGORY, so a caller
+    — or a hand-crafted POST — that leaves it out records a session all the
+    same; an unknown value is rejected the way an unknown feeling is.
     """
     workout = db.session.get(Workout, workout_id)
     if not workout:
@@ -233,6 +243,13 @@ def log_session(
         raise ValidationError("Duration must be between 10 and 90 minutes.")
     if feeling not in FEELINGS:
         raise ValidationError("Feeling must be good, okay or bad.")
+    if category not in CATEGORIES:
+        # Built from the labels the dropdown is filled with, so the message and
+        # the options it names cannot drift apart.
+        raise ValidationError(
+            "Sort of sport must be one of "
+            f"{', '.join(CATEGORIES.values())}."
+        )
     if not isinstance(session_date, date_type):
         raise ValidationError("Invalid date.")
     comment = (comment or "").strip()
@@ -306,6 +323,7 @@ def log_session(
         date=session_date,
         duration_minutes=duration_minutes,
         feeling=feeling,
+        category=category,
         comment=comment or None,
     )
     session.logs = logs
@@ -349,14 +367,24 @@ _WEIGHTED_LOGS = db.func.count(SessionExercise.weight)
 
 
 def _calendar_weeks(
-    counts: dict[date_type, int], end: date_type, days: int
+    counts: dict[date_type, int],
+    end: date_type,
+    days: int,
+    categories: dict[date_type, str] | None = None,
 ) -> dict:
     """Bucket per-day counts into a GitHub-style grid of Monday-first weeks.
 
     Returns {"weeks": [[cell, ...] x7 per week], "max": int, "months": [...]}
-    where each cell is {"date": iso string, "count": int, "level": 0-4} or None
-    for the padding days before the window starts. Levels are relative to the
-    busiest day, and counts outside the window are ignored.
+    where each cell is {"date": iso string, "count": int, "level": 0-4,
+    "category": str | None} or None for the padding days before the window
+    starts. Levels are relative to the busiest day, and counts outside the
+    window are ignored.
+
+    `categories` maps a day to the sort of sport it should be coloured by,
+    which is what the activity map uses to tell one category from another. A
+    day it says nothing about — every day of a per-exercise grid, where a cell
+    counts repetitions rather than sessions — gets `category` None and is
+    shaded with the default scale.
 
     `months` labels the x axis: one {"label": "Sep 2025", "weeks": int} per run
     of week columns, so the labels can be laid out above the grid. A week is
@@ -365,6 +393,7 @@ def _calendar_weeks(
     """
     start = end - timedelta(days=days - 1)
     counts = {day: count for day, count in counts.items() if start <= day <= end}
+    categories = categories or {}
     max_count = max(counts.values(), default=0)
 
     def level(count: int) -> int:
@@ -378,7 +407,12 @@ def _calendar_weeks(
     while current <= end:
         count = counts.get(current, 0)
         week.append(
-            {"date": current.isoformat(), "count": count, "level": level(count)}
+            {
+                "date": current.isoformat(),
+                "count": count,
+                "level": level(count),
+                "category": categories.get(current),
+            }
         )
         if len(week) == 7:
             weeks.append(week)
@@ -447,6 +481,16 @@ def _repetition_trend(dates: dict[date_type, int]) -> dict:
     }
 
 
+def _category_rank(category: str) -> int:
+    """Where a category sits in CATEGORIES, which is what breaks a tie.
+
+    A value CATEGORIES no longer knows — only reachable through data logged
+    before it was renamed — sorts last rather than raising.
+    """
+    order = list(CATEGORIES)
+    return order.index(category) if category in order else len(order)
+
+
 def activity_map(
     end: date_type | None = None, days: int = 365, user_id: int | None = None
 ) -> dict:
@@ -454,6 +498,12 @@ def activity_map(
 
     Cells count the sessions logged that day, by `user_id` or by everyone; see
     `_calendar_weeks` for the returned shape.
+
+    Each day also carries the `category` its cell is coloured by: the sort of
+    sport most of that day's sessions were. A day holding two sorts in equal
+    numbers takes whichever comes first in CATEGORIES, so the colour of a day
+    never depends on the order the rows came back in. A day with no session has
+    no category at all.
     """
     end = end or date_type.today()
     start = end - timedelta(days=days - 1)
@@ -461,14 +511,28 @@ def activity_map(
     rows = (
         _for_user(
             db.session.query(
-                WorkoutSession.date, db.func.count(WorkoutSession.id)
+                WorkoutSession.date,
+                WorkoutSession.category,
+                db.func.count(WorkoutSession.id),
             ).filter(WorkoutSession.date >= start, WorkoutSession.date <= end),
             user_id,
         )
-        .group_by(WorkoutSession.date)
+        .group_by(WorkoutSession.date, WorkoutSession.category)
         .all()
     )
-    return _calendar_weeks({day: count for day, count in rows}, end, days)
+
+    counts: dict[date_type, int] = {}
+    categories: dict[date_type, str] = {}
+    ranking: dict[date_type, tuple[int, int]] = {}
+    for day, category, count in rows:
+        counts[day] = counts.get(day, 0) + count
+        # Most sessions wins; CATEGORIES order settles a tie.
+        rank = (-count, _category_rank(category))
+        if day not in ranking or rank < ranking[day]:
+            ranking[day] = rank
+            categories[day] = category
+
+    return _calendar_weeks(counts, end, days, categories)
 
 
 def workout_frequency(user_id: int | None = None) -> list[dict]:

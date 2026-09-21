@@ -3,6 +3,7 @@ from datetime import date, timedelta
 import pytest
 
 from src import services
+from src.models import DEFAULT_CATEGORY
 
 
 @pytest.fixture()
@@ -84,6 +85,56 @@ def test_activity_map_weeks_start_monday(app):
     data = services.activity_map(end=date(2026, 9, 8), days=365)
     first_full_week = next(w for w in data["weeks"] if all(w))
     assert date.fromisoformat(first_full_week[0]["date"]).weekday() == 0
+
+
+def test_activity_map_has_no_category_on_a_day_without_a_session(app, seeded):
+    data = services.activity_map(end=date(2026, 9, 8), days=30)
+    by_date = {c["date"]: c for week in data["weeks"] for c in week if c}
+    assert by_date["2026-09-02"]["category"] is None
+    # the seeded sessions were logged without a sort of sport, so they default
+    assert by_date["2026-09-01"]["category"] == DEFAULT_CATEGORY
+
+
+def test_activity_map_colours_each_day_by_its_sort_of_sport(app, user):
+    workout = services.create_workout("Leg day", ["Squat"])
+    reps = {workout.exercises[0].id: 10}
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, reps, "good", category="judo"
+    )
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 2), 45, reps, "good", category="mobility"
+    )
+    data = services.activity_map(end=date(2026, 9, 8), days=30)
+    by_date = {c["date"]: c for week in data["weeks"] for c in week if c}
+    assert by_date["2026-09-01"]["category"] == "judo"
+    assert by_date["2026-09-02"]["category"] == "mobility"
+
+
+def test_activity_map_day_of_several_sorts_takes_the_one_done_most(app, user):
+    workout = services.create_workout("Leg day", ["Squat"])
+    reps = {workout.exercises[0].id: 10}
+    day = date(2026, 9, 3)
+    services.log_session(workout.id, user.id, day, 45, reps, "good", category="weights")
+    for _ in range(2):
+        services.log_session(
+            workout.id, user.id, day, 45, reps, "good", category="mobility"
+        )
+    data = services.activity_map(end=date(2026, 9, 8), days=30)
+    by_date = {c["date"]: c for week in data["weeks"] for c in week if c}
+    assert by_date["2026-09-03"]["count"] == 3  # the shade still counts them all
+    assert by_date["2026-09-03"]["category"] == "mobility"
+
+
+def test_activity_map_breaks_a_tied_day_by_category_order(app, user):
+    """Two sorts done once each: the colour must not depend on row order."""
+    workout = services.create_workout("Leg day", ["Squat"])
+    reps = {workout.exercises[0].id: 10}
+    day = date(2026, 9, 3)
+    services.log_session(workout.id, user.id, day, 45, reps, "good", category="other")
+    services.log_session(workout.id, user.id, day, 45, reps, "good", category="judo")
+    data = services.activity_map(end=date(2026, 9, 8), days=30)
+    by_date = {c["date"]: c for week in data["weeks"] for c in week if c}
+    assert by_date["2026-09-03"]["category"] == "judo"  # earlier in CATEGORIES
 
 
 # ---------------------------------------------------------- workout_frequency
@@ -476,6 +527,15 @@ def test_exercise_heatmap_counts_repetitions_per_day(app, seeded):
     assert squat["heatmap"]["max"] == 35
 
 
+def test_exercise_heatmap_cells_carry_no_sort_of_sport(app, seeded):
+    """Only the activity map is coloured by category; a repetition has none."""
+    squat = next(
+        r for r in services.exercise_repetitions(end=date(2026, 9, 8))
+        if r["name"] == "Squat"
+    )
+    assert all(cell["category"] is None for cell in cells(squat).values())
+
+
 def test_exercise_heatmap_spans_the_whole_window_monday_first(app, seeded):
     end = date(2026, 9, 8)
     row = services.exercise_repetitions(end=end)[0]
@@ -772,6 +832,21 @@ def two_users(app, user, other_user):
         extra_exercises=[("Dip", 8)],
     )
     return {"legs": legs}
+
+
+def test_activity_map_is_coloured_per_user(app, two_users, user, other_user):
+    """The colour follows the filter: another person's sort is not shown."""
+    legs = two_users["legs"]
+    reps = {m.id: 10 for m in legs.exercises}
+    day = date(2026, 9, 5)
+    services.log_session(legs.id, user.id, day, 45, reps, "good", category="judo")
+    services.log_session(
+        legs.id, other_user.id, day, 45, reps, "good", category="mobility"
+    )
+    for person, expected in ((user, "judo"), (other_user, "mobility")):
+        data = services.activity_map(end=date(2026, 9, 8), days=30, user_id=person.id)
+        by_date = {c["date"]: c for week in data["weeks"] for c in week if c}
+        assert by_date["2026-09-05"]["category"] == expected
 
 
 def test_activity_map_for_one_user(app, two_users, user, other_user):

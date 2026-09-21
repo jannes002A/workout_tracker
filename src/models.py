@@ -9,6 +9,18 @@ FEELINGS = ("good", "okay", "bad")
 # Numeric score per feeling, used to plot the feeling trend. Higher is better.
 FEELING_SCORES = {"bad": 1, "okay": 2, "good": 3}
 
+# What sort of sport a session was, picked from the dropdown at the very top of
+# the track form: value -> the label shown for it. The activity map colours a
+# day by its category, so this order is also the order of the map's legend and
+# the tie-break for a day holding several sorts of sport.
+CATEGORIES = {
+    "weights": "Weights",
+    "judo": "Judo",
+    "mobility": "Mobility",
+    "other": "Others",
+}
+DEFAULT_CATEGORY = "weights"  # what the dropdown opens on
+
 
 class User(db.Model):
     """A person whose sessions are tracked. Workouts themselves are shared."""
@@ -55,7 +67,12 @@ class Exercise(db.Model):
 
 
 class WorkoutSession(db.Model):
-    """One performed instance of a workout, by one user (tracked on /track)."""
+    """One performed instance of a workout, by one user (tracked on /track).
+
+    `category` is the sort of sport it was — one of CATEGORIES, asked for at the
+    very top of the track form because it describes the whole session rather
+    than any one exercise. The activity map colours each day by it.
+    """
 
     id = db.Column(db.Integer, primary_key=True)
     workout_id = db.Column(db.Integer, db.ForeignKey("workout.id"), nullable=False)
@@ -63,6 +80,9 @@ class WorkoutSession(db.Model):
     date = db.Column(db.Date, nullable=False, default=date_type.today)
     duration_minutes = db.Column(db.Integer, nullable=False)  # 10-90
     feeling = db.Column(db.String(10), nullable=False)  # good / okay / bad
+    category = db.Column(  # which of CATEGORIES the session was
+        db.String(20), nullable=False, default=DEFAULT_CATEGORY
+    )
     comment = db.Column(db.Text)  # free text, NULL when the field was left blank
     logs = db.relationship(
         "SessionExercise", backref="session", cascade="all, delete-orphan", lazy=True
@@ -82,10 +102,15 @@ class WorkoutSession(db.Model):
         """
         return sum(log.weight_moved or 0 for log in self.logs)
 
+    @property
+    def category_label(self) -> str:
+        """The label CATEGORIES gives this session's sort of sport."""
+        return CATEGORIES.get(self.category, self.category)
+
     def __repr__(self) -> str:
         return (
             f"<WorkoutSession workout={self.workout_id} "
-            f"user={self.user_id} date={self.date}>"
+            f"user={self.user_id} date={self.date} category={self.category}>"
         )
 
 

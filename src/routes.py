@@ -3,7 +3,7 @@ from datetime import date as date_type
 from flask import Blueprint, flash, redirect, render_template, request, url_for
 
 from src import services
-from src.models import FEELINGS
+from src.models import CATEGORIES, DEFAULT_CATEGORY, FEELINGS
 from src.services import (
     DEFAULT_SETS,
     DEFAULT_TRACKING_MODE,
@@ -32,6 +32,7 @@ EXTRA_REPS_FIELD = "extra-reps"  # done in this session only
 EXTRA_WEIGHT_FIELD = "extra-weight"
 EXTRA_SETS_FIELD = "extra-sets"
 MODE_FIELD = "tracking_mode"  # counts the session in totals or in sets
+CATEGORY_FIELD = "category"  # the sort of sport, at the very top of the form
 NO_WEIGHT_VALUE = ""  # the weight dropdown's "no extra weight" option
 USER_FIELD = "user_id"  # picks the user on /track, filters /analytics
 COMMENT_FIELD = "comment"  # the session's free-text note
@@ -195,6 +196,10 @@ def track():
                 feeling=request.form.get("feeling", ""),
                 extra_exercises=_extra_exercises_from_form(request.form),
                 comment=request.form.get(COMMENT_FIELD, ""),
+                # Missing entirely — a hand-crafted POST — is the default sort
+                # of sport; a value the dropdown cannot have produced is an
+                # error, the way an unknown feeling is.
+                category=request.form.get(CATEGORY_FIELD, DEFAULT_CATEGORY),
             )
             # A session of nothing but bodyweight exercises has no weight to
             # report, so it is summed up in repetitions alone.
@@ -206,7 +211,8 @@ def track():
             flash(
                 f"Logged {session.workout.name} for {session.user.name} on "
                 f"{session.date.isoformat()} "
-                f"({session.total_repetitions} repetitions{moved}).",
+                f"({session.category_label.lower()}, "
+                f"{session.total_repetitions} repetitions{moved}).",
                 "success",
             )
             return redirect(url_for("main.track"))
@@ -217,6 +223,9 @@ def track():
         workouts=services.get_all_workouts(),
         users=services.get_all_users(),
         user_field=USER_FIELD,
+        categories=CATEGORIES,
+        default_category=DEFAULT_CATEGORY,
+        category_field=CATEGORY_FIELD,
         dates=services.date_choices(),
         durations=DURATION_CHOICES,
         repetitions=REPETITION_CHOICES,
@@ -262,6 +271,7 @@ def analytics():
         users=services.get_all_users(),
         user=user,
         user_field=USER_FIELD,
+        categories=CATEGORIES,
         weight_unit=WEIGHT_UNIT,
     )
 

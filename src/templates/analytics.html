@@ -2,7 +2,10 @@
 {% block title %}Analytics · Training Log{% endblock %}
 
 {# GitHub-style calendar grid, shared by the activity map and the per-exercise
-   heatmaps: one cell per day, shaded 0-4 relative to the busiest day. #}
+   heatmaps: one cell per day, shaded 0-4 relative to the busiest day. A cell
+   that carries a category is hued by it as well — that is the activity map,
+   where a day's colour says what sort of sport it was; the per-exercise grids
+   carry none and keep the default scale. #}
 {% macro heatmap(data, label, unit) %}
   <div class="heatmap-wrap">
     {# Each label spans its month's week columns, so it lines up with the grid. #}
@@ -16,7 +19,7 @@
         <div class="heatmap-week">
           {% for cell in week %}
             {% if cell %}
-              <span class="cell level-{{ cell.level }}" title="{{ cell.date }}: {{ cell.count }} {{ unit }}{{ '' if cell.count == 1 else 's' }}"></span>
+              <span class="cell level-{{ cell.level }}{% if cell.category %} cat-{{ cell.category }}{% endif %}" title="{{ cell.date }}: {{ cell.count }} {{ unit }}{{ '' if cell.count == 1 else 's' }}{% if cell.category %} · {{ categories.get(cell.category, cell.category) }}{% endif %}"></span>
             {% else %}
               <span class="cell pad"></span>
             {% endif %}
@@ -44,6 +47,17 @@
   More</p>
 {% endmacro %}
 
+{# Which colour on the activity map is which sort of sport. The swatches are
+   cells at full shade, so they are exactly the colour of a day's busiest
+   level, and the order is the one CATEGORIES sets. #}
+{% macro category_legend() %}
+  <p class="legend category-legend">
+    {% for value, label in categories.items() %}
+      <span class="cell level-4 cat-{{ value }}"></span>{{ label }}
+    {% endfor %}
+  </p>
+{% endmacro %}
+
 {% block content %}
 <h1>Analytics</h1>
 
@@ -69,7 +83,11 @@
 
 <section>
   <h2>Activity, last 12 months</h2>
+  <p class="lede">One cell per day. The colour is the sort of sport that day was
+  — a day of several takes the one done most — and the shade is how many
+  sessions it held, against the busiest day of the year.</p>
   {{ heatmap(activity, "Daily workout activity for the last year", "session") }}
+  {{ category_legend() }}
   {{ heatmap_legend() }}
 </section>
 

@@ -3,7 +3,16 @@ from datetime import date, timedelta
 import pytest
 
 from src import services
-from src.models import Exercise, SessionExercise, User, Workout, WorkoutSession, db
+from src.models import (
+    CATEGORIES,
+    DEFAULT_CATEGORY,
+    Exercise,
+    SessionExercise,
+    User,
+    Workout,
+    WorkoutSession,
+    db,
+)
 from src.services import ValidationError
 
 
@@ -304,6 +313,37 @@ def test_log_session_invalid_feeling(app, workout, feeling, user):
             workout.id,
             user.id, date.today(), 45, reps_for(workout, 30, 20), feeling
         )
+
+
+@pytest.mark.parametrize("category", list(CATEGORIES))
+def test_log_session_records_the_sort_of_sport(app, workout, category, user):
+    session = services.log_session(
+        workout.id,
+        user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good",
+        category=category,
+    )
+    assert session.category == category
+    assert session.category_label == CATEGORIES[category]
+
+
+def test_log_session_defaults_to_the_default_sort_of_sport(app, workout, user):
+    """A caller that says nothing — or a POST without the field — still logs."""
+    session = services.log_session(
+        workout.id,
+        user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good"
+    )
+    assert session.category == DEFAULT_CATEGORY
+
+
+@pytest.mark.parametrize("category", ["running", "", "Judo", None])
+def test_log_session_rejects_an_unknown_sort_of_sport(app, workout, category, user):
+    with pytest.raises(ValidationError, match="Sort of sport"):
+        services.log_session(
+            workout.id,
+            user.id, date.today(), 45, reps_for(workout, 30, 20), "good",
+            category=category,
+        )
+    assert WorkoutSession.query.count() == 0
 
 
 @pytest.mark.parametrize("reps", [0, 1, 100, 120])

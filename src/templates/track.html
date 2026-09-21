@@ -43,7 +43,7 @@
 
 {% block content %}
 <h1>Track a session</h1>
-<p class="lede">Pick who trained and which workout they did, then record how many repetitions they did of each of its exercises — as a total, or as sets of so many repetitions each — and how much extra weight they carried ({{ weight_unit }}) — leave it at <em>none</em> for bodyweight, and the exercise is counted in repetitions only, with no weight moved.</p>
+<p class="lede">Pick what sort of sport it was, who trained and which workout they did, then record how many repetitions they did of each of its exercises — as a total, or as sets of so many repetitions each — and how much extra weight they carried ({{ weight_unit }}) — leave it at <em>none</em> for bodyweight, and the exercise is counted in repetitions only, with no weight moved.</p>
 
 {% if not users %}
   <p class="empty">You need a user first — <a href="{{ url_for('main.users') }}">add one</a>, then come back to track their sessions.</p>
@@ -51,6 +51,15 @@
   <p class="empty">You need a workout first — <a href="{{ url_for('main.create') }}">create one</a>, then come back to track it.</p>
 {% else %}
 <form method="post" class="panel" id="track-form">
+  {# The sort of sport comes first: it describes the whole session, and the
+     analytics page colours the activity map by it. #}
+  <label for="{{ category_field }}">What sort of sport?</label>
+  <select id="{{ category_field }}" name="{{ category_field }}" required>
+    {% for value, label in categories.items() %}
+      <option value="{{ value }}" {% if value == default_category %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+
   <label for="{{ user_field }}">Who did it?</label>
   <select id="{{ user_field }}" name="{{ user_field }}" required>
     {% for u in users %}

@@ -2,7 +2,14 @@ import re
 from datetime import date, timedelta
 
 from src import routes, services
-from src.models import SessionExercise, User, Workout, WorkoutSession
+from src.models import (
+    CATEGORIES,
+    DEFAULT_CATEGORY,
+    SessionExercise,
+    User,
+    Workout,
+    WorkoutSession,
+)
 
 
 def test_index_redirects_to_create(client):
@@ -149,6 +156,9 @@ def track_form(workout, user, reps, weights=None, sets=None, **overrides):
     `sets` adds a sets- field per exercise and switches the mode dropdown over
     to counting in sets, which makes `reps` the repetitions of one set. Left
     out, the form counts totals, the way it opens.
+
+    The sort of sport goes along at its default, the way the dropdown at the
+    top of the form opens; override it like any other field.
     """
     data = {
         "workout_id": workout.id,
@@ -157,6 +167,7 @@ def track_form(workout, user, reps, weights=None, sets=None, **overrides):
         "duration": "45",
         "feeling": "good",
         routes.MODE_FIELD: services.TOTAL_MODE,
+        routes.CATEGORY_FIELD: DEFAULT_CATEGORY,
     }
     weights = weights if weights is not None else [routes.NO_WEIGHT_VALUE] * len(reps)
     data.update({f"reps-{m.id}": str(v) for m, v in zip(workout.exercises, reps)})
@@ -166,6 +177,51 @@ def track_form(workout, user, reps, weights=None, sets=None, **overrides):
         data.update({f"sets-{m.id}": str(v) for m, v in zip(workout.exercises, sets)})
     data.update(overrides)
     return data
+
+
+def test_track_page_offers_the_sort_of_sport_first(client, app, user):
+    with app.app_context():
+        services.create_workout("Leg day", ["Squat"])
+    html = client.get("/track").data.decode()
+    assert f'name="{routes.CATEGORY_FIELD}"' in html
+    for value, label in CATEGORIES.items():
+        assert f'value="{value}"' in html
+        assert f">{label}</option>" in html
+    # the very top of the form: ahead of who trained and what they did
+    assert html.index(f'name="{routes.CATEGORY_FIELD}"') < html.index(
+        f'name="{routes.USER_FIELD}"'
+    ) < html.index('name="workout_id"')
+
+
+def test_track_logs_the_chosen_sort_of_sport(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        form = track_form(workout, user, [30], **{routes.CATEGORY_FIELD: "judo"})
+    response = client.post("/track", data=form, follow_redirects=True)
+    assert b"(judo, " in response.data  # the summary names the sort of sport
+    with app.app_context():
+        assert WorkoutSession.query.one().category == "judo"
+
+
+def test_track_defaults_the_sort_of_sport_when_the_field_is_missing(client, app, user):
+    """A hand-crafted POST without the field still logs a session."""
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        form = track_form(workout, user, [30])
+        del form[routes.CATEGORY_FIELD]
+    client.post("/track", data=form, follow_redirects=True)
+    with app.app_context():
+        assert WorkoutSession.query.one().category == DEFAULT_CATEGORY
+
+
+def test_track_rejects_an_unknown_sort_of_sport(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        form = track_form(workout, user, [30], **{routes.CATEGORY_FIELD: "chess"})
+    response = client.post("/track", data=form)
+    assert b"Sort of sport must be one of" in response.data
+    with app.app_context():
+        assert WorkoutSession.query.count() == 0
 
 
 def test_track_page_contains_all_dropdowns(client, app, user):
@@ -621,6 +677,41 @@ def test_analytics_page_lists_extra_exercises(client, app, user):
     assert "Pull-up" in html
     assert "extra, this session only" in html
     assert "42 " in html  # grand total includes the extra
+
+
+def test_analytics_activity_map_colours_a_day_by_its_sort_of_sport(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        services.log_session(
+            workout.id, user.id, date.today(), 45,
+            {workout.exercises[0].id: 30}, "good", category="judo",
+        )
+    html = client.get("/analytics").data.decode()
+    activity = html[: html.index("Workouts performed")]
+    assert f'class="cell level-4 cat-judo" title="{date.today().isoformat()}: 1 session · Judo"' in activity
+
+
+def test_analytics_activity_map_has_a_legend_of_every_sort_of_sport(client, app):
+    html = client.get("/analytics").data.decode()
+    legend = html[html.index("category-legend") : html.index("Workouts performed")]
+    for value, label in CATEGORIES.items():
+        assert f'class="cell level-4 cat-{value}"' in legend
+        assert label in legend
+
+
+def test_analytics_exercise_heatmaps_are_not_coloured_by_sort_of_sport(
+    client, app, user
+):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        services.log_session(
+            workout.id, user.id, date.today(), 45,
+            {workout.exercises[0].id: 30}, "good", category="judo",
+        )
+    section = client.get("/analytics").data.decode()
+    section = section[section.index("Repetitions per exercise") :]
+    assert "cat-judo" not in section
+    assert f'class="cell level-4" title="{date.today().isoformat()}: 30' in section
 
 
 def test_analytics_page_sections_are_ordered(client):
