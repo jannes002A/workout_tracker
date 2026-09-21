@@ -137,6 +137,99 @@ def test_activity_map_breaks_a_tied_day_by_category_order(app, user):
     assert by_date["2026-09-03"]["category"] == "judo"  # earlier in CATEGORIES
 
 
+# ---------------------------------------------------------- day_sessions
+
+
+def test_day_sessions_lists_what_was_logged_that_day(app, seeded, user):
+    day = services.day_sessions(date(2026, 9, 3))
+    assert [s["workout"] for s in day] == ["Leg day", "Push day"]  # logged order
+    legs = day[0]
+    assert legs["user"] == user.name
+    assert legs["duration_minutes"] == 30
+    assert legs["feeling"] == "okay"
+    assert legs["repetitions"] == 50  # 30 squats + 20 lunges
+    assert [(e["name"], e["repetitions"]) for e in legs["exercises"]] == [
+        ("Squat", 30),
+        ("Lunge", 20),
+    ]
+
+
+def test_day_sessions_is_empty_for_a_day_with_nothing_on_it(app, seeded):
+    assert services.day_sessions(date(2026, 9, 2)) == []
+
+
+def test_day_sessions_carries_the_sort_of_sport(app, user):
+    workout = services.create_workout("Leg day", ["Squat"])
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {workout.exercises[0].id: 10},
+        "good", category="judo",
+    )
+    entry = services.day_sessions(date(2026, 9, 1))[0]
+    assert (entry["category"], entry["category_label"]) == ("judo", "Judo")
+
+
+def test_day_sessions_reports_weights_and_bodyweight_apart(app, user):
+    workout = services.create_workout("Leg day", ["Squat", "Lunge"])
+    squat, lunge = workout.exercises
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {squat.id: 10, lunge.id: 20},
+        "good", weights_by_exercise={squat.id: 40, lunge.id: services.NO_WEIGHT},
+    )
+    entry = services.day_sessions(date(2026, 9, 1))[0]
+    by_name = {e["name"]: e for e in entry["exercises"]}
+    assert (by_name["Squat"]["weight"], by_name["Squat"]["weight_moved"]) == (40, 400)
+    # bodyweight is None, not 0, so the page can leave the figure out entirely
+    assert by_name["Lunge"]["weight"] is None
+    assert by_name["Lunge"]["weight_moved"] is None
+    assert entry["weight"] == 400  # the session totals only what was carried
+
+
+def test_day_sessions_reports_how_the_repetitions_were_counted(app, user):
+    workout = services.create_workout("Leg day", ["Squat"])
+    squat = workout.exercises[0]
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {squat.id: 12}, "good",
+        sets_by_exercise={squat.id: 4},
+    )
+    entry = services.day_sessions(date(2026, 9, 1))[0]
+    exercise = entry["exercises"][0]
+    assert (exercise["sets"], exercise["repetitions_per_set"]) == (4, 12)
+    assert exercise["repetitions"] == 48  # 4 sets of 12 is what was performed
+
+
+def test_day_sessions_marks_extra_exercises(app, user):
+    workout = services.create_workout("Leg day", ["Squat"])
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {workout.exercises[0].id: 10},
+        "good", extra_exercises=[("Pull-up", 12)],
+    )
+    entry = services.day_sessions(date(2026, 9, 1))[0]
+    # the workout's own exercises come first, the extras after them
+    assert [(e["name"], e["extra"]) for e in entry["exercises"]] == [
+        ("Squat", False),
+        ("Pull-up", True),
+    ]
+
+
+def test_day_sessions_carries_the_comment_or_none(app, user):
+    workout = services.create_workout("Leg day", ["Squat"])
+    reps = {workout.exercises[0].id: 10}
+    services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, reps, "good", comment="Knee fine."
+    )
+    services.log_session(workout.id, user.id, date(2026, 9, 2), 45, reps, "good")
+    assert services.day_sessions(date(2026, 9, 1))[0]["comment"] == "Knee fine."
+    assert services.day_sessions(date(2026, 9, 2))[0]["comment"] is None
+
+
+def test_day_sessions_for_one_user(app, two_users, user, other_user):
+    """The day follows the page's filter, like every other section."""
+    assert [s["user"] for s in services.day_sessions(date(2026, 9, 2))] == ["Sam"]
+    assert services.day_sessions(date(2026, 9, 2), user_id=user.id) == []
+    mine = services.day_sessions(date(2026, 9, 1), user_id=user.id)
+    assert [s["user"] for s in mine] == ["Alex"]
+
+
 # ---------------------------------------------------------- workout_frequency
 
 

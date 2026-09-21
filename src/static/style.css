@@ -259,6 +259,52 @@ button.ghost:hover { border-style: solid; }
 .category-legend .cell { margin-left: 0.6rem; }
 .category-legend .cell:first-child { margin-left: 0; }
 
+/* Days that hold a session are links to their own details; the empty ones stay
+   spans, so only what can be opened looks like it can. The outline sits
+   outside the cell, which keeps the grid's spacing exactly as it was. */
+a.cell { cursor: pointer; }
+a.cell:hover, a.cell:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+.cell.selected { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+/* --- analytics: one day of the activity map --- */
+.day-detail {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.25rem 1rem 1rem;
+  margin-top: 1rem;
+}
+.day-detail h3 { font-stretch: 85%; font-weight: 700; margin: 0.9rem 0 0.15rem; }
+.day-session { margin-top: 1.25rem; }
+.day-session:first-of-type { margin-top: 0.5rem; }
+.day-session-meta {
+  margin: 0 0 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+.day-session-meta .cell, .day-session-meta .swatch {
+  width: 11px; height: 11px; border-radius: 2px;
+  display: inline-block; margin-right: 0.3rem;
+}
+.day-session .freq-table { margin-top: 0.6rem; }
+.day-session .comment-text {
+  margin-top: 0.6rem;
+  border-left: 6px solid var(--line);
+  padding-left: 0.7rem;
+}
+/* An exercise done in that session only, never added to the workout. */
+.tag {
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--ink-soft);
+  background: var(--heat-0);
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  vertical-align: middle;
+}
+.day-close { font-size: 0.85rem; }
+
 .freq-table { border-collapse: collapse; width: 100%; max-width: 480px; background: #fff; }
 .freq-table.wide { max-width: 100%; }
 .freq-table th, .freq-table td { text-align: left; padding: 0.55rem 0.9rem; border-bottom: 1px solid var(--line); }

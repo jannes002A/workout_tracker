@@ -5,8 +5,13 @@
    heatmaps: one cell per day, shaded 0-4 relative to the busiest day. A cell
    that carries a category is hued by it as well — that is the activity map,
    where a day's colour says what sort of sport it was; the per-exercise grids
-   carry none and keep the default scale. #}
-{% macro heatmap(data, label, unit) %}
+   carry none and keep the default scale.
+
+   `linked` turns the days that hold something into links to their own
+   details — the activity map, where a cell stands for sessions there is more
+   to say about. A day with nothing on it stays a plain span, so only the cells
+   worth opening are clickable, and the whole drill-down works without JS. #}
+{% macro heatmap(data, label, unit, linked=false) %}
   <div class="heatmap-wrap">
     {# Each label spans its month's week columns, so it lines up with the grid. #}
     <div class="heatmap-months" aria-hidden="true">
@@ -19,7 +24,16 @@
         <div class="heatmap-week">
           {% for cell in week %}
             {% if cell %}
-              <span class="cell level-{{ cell.level }}{% if cell.category %} cat-{{ cell.category }}{% endif %}" title="{{ cell.date }}: {{ cell.count }} {{ unit }}{{ '' if cell.count == 1 else 's' }}{% if cell.category %} · {{ categories.get(cell.category, cell.category) }}{% endif %}"></span>
+              {%- set classes = "cell level-" ~ cell.level
+                   ~ (" cat-" ~ cell.category if cell.category else "")
+                   ~ (" selected" if day and cell.date == day.isoformat() else "") -%}
+              {%- set caption = cell.date ~ ": " ~ cell.count ~ " " ~ unit ~ ("" if cell.count == 1 else "s")
+                   ~ (" · " ~ categories.get(cell.category, cell.category) if cell.category else "") -%}
+              {% if linked and cell.count %}
+                <a class="{{ classes }}" href="{{ url_for('main.analytics', user_id=(user.id if user else none), day=cell.date, _anchor='day') }}" title="{{ caption }}" aria-label="{{ caption }}"></a>
+              {% else %}
+                <span class="{{ classes }}" title="{{ caption }}"></span>
+              {% endif %}
             {% else %}
               <span class="cell pad"></span>
             {% endif %}
@@ -58,6 +72,60 @@
   </p>
 {% endmacro %}
 
+{# What one day of the activity map holds: every session logged on it, for
+   whoever the page is filtered to. Rendered from the `day` in the query
+   string, so it survives a reload and can be linked to. #}
+{% macro day_detail() %}
+  {% if not day %}
+    <p class="hint">Pick a day on the map to see the sessions behind it.</p>
+  {% else %}
+    <div class="day-detail" id="day">
+      <h3>{{ day.strftime('%A %d %b %Y') }}</h3>
+      {% if day_sessions %}
+        {% for s in day_sessions %}
+          <article class="day-session">
+            <p class="day-session-meta">
+              <span class="cell level-4 cat-{{ s.category }}"></span>{{ s.category_label }}
+              · {{ s.workout }}
+              {#- with a user picked the page already says whose day this is #}
+              {%- if not user %} · {{ s.user }}{% endif %}
+              · {{ s.duration_minutes }} min
+              · <span class="swatch swatch-{{ s.feeling }}"></span>felt {{ s.feeling }}
+            </p>
+            <p class="chart-caption">
+              {{ s.exercises | length }} exercise{{ '' if s.exercises | length == 1 else 's' }}
+              · {{ s.repetitions }} repetition{{ '' if s.repetitions == 1 else 's' }}
+              {#- nothing was carried, so there is no weight to report #}
+              {%- if s.weight %} · {{ s.weight }} {{ weight_unit }} moved{% endif %}
+            </p>
+            <table class="freq-table">
+              <thead>
+                <tr><th>Exercise</th><th>Repetitions</th><th>Extra {{ weight_unit }}</th></tr>
+              </thead>
+              <tbody>
+                {% for e in s.exercises %}
+                  <tr>
+                    <td>{{ e.name }}{% if e.extra %} <span class="tag">extra</span>{% endif %}</td>
+                    {#- counted in sets, the reps of one set and their product are
+                        both worth seeing; counted as a total there is just the one #}
+                    <td>{% if e.sets %}{{ e.sets }} × {{ e.repetitions_per_set }} = {{ e.repetitions }}{% else %}{{ e.repetitions }}{% endif %}</td>
+                    {#- NULL is bodyweight, which is not a weight of 0 #}
+                    <td{% if e.weight is none %} class="muted"{% endif %}>{{ e.weight if e.weight is not none else 'bodyweight' }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            {% if s.comment %}<p class="comment-text">{{ s.comment }}</p>{% endif %}
+          </article>
+        {% endfor %}
+      {% else %}
+        <p class="empty">Nothing logged on this day{% if user %} by {{ user.name }}{% endif %}.</p>
+      {% endif %}
+      <p><a class="day-close" href="{{ url_for('main.analytics', user_id=(user.id if user else none)) }}">Close this day</a></p>
+    </div>
+  {% endif %}
+{% endmacro %}
+
 {% block content %}
 <h1>Analytics</h1>
 
@@ -71,6 +139,8 @@
       <option value="{{ u.id }}" {% if user and u.id == user.id %}selected{% endif %}>{{ u.name }}</option>
     {% endfor %}
   </select>
+  {#- the day survives a change of user, so the panel follows the filter #}
+  {% if day %}<input type="hidden" name="{{ day_field }}" value="{{ day.isoformat() }}">{% endif %}
   <button type="submit">Show</button>
 </form>
 <p class="lede">
@@ -86,9 +156,10 @@
   <p class="lede">One cell per day. The colour is the sort of sport that day was
   — a day of several takes the one done most — and the shade is how many
   sessions it held, against the busiest day of the year.</p>
-  {{ heatmap(activity, "Daily workout activity for the last year", "session") }}
+  {{ heatmap(activity, "Daily workout activity for the last year", "session", linked=true) }}
   {{ category_legend() }}
   {{ heatmap_legend() }}
+  {{ day_detail() }}
 </section>
 
 <section>

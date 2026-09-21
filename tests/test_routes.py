@@ -688,7 +688,8 @@ def test_analytics_activity_map_colours_a_day_by_its_sort_of_sport(client, app, 
         )
     html = client.get("/analytics").data.decode()
     activity = html[: html.index("Workouts performed")]
-    assert f'class="cell level-4 cat-judo" title="{date.today().isoformat()}: 1 session · Judo"' in activity
+    assert 'class="cell level-4 cat-judo"' in activity
+    assert f'title="{date.today().isoformat()}: 1 session · Judo"' in activity
 
 
 def test_analytics_activity_map_has_a_legend_of_every_sort_of_sport(client, app):
@@ -712,6 +713,137 @@ def test_analytics_exercise_heatmaps_are_not_coloured_by_sort_of_sport(
     section = section[section.index("Repetitions per exercise") :]
     assert "cat-judo" not in section
     assert f'class="cell level-4" title="{date.today().isoformat()}: 30' in section
+
+
+def test_analytics_days_with_a_session_link_to_their_own_details(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        services.log_session(
+            workout.id, user.id, date.today(), 45, {workout.exercises[0].id: 30}, "good"
+        )
+    html = client.get("/analytics").data.decode()
+    activity = html[: html.index("Workouts performed")]
+    today = date.today().isoformat()
+    assert f'href="/analytics?day={today}#day"' in activity
+    # a day with nothing on it is not a link, so only what opens looks clickable
+    empty = (date.today() - timedelta(days=1)).isoformat()
+    assert f"day={empty}" not in activity
+
+
+def test_analytics_day_links_keep_the_selected_user(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        services.log_session(
+            workout.id, user.id, date.today(), 45, {workout.exercises[0].id: 30}, "good"
+        )
+    html = client.get(f"/analytics?user_id={user.id}").data.decode()
+    assert f'href="/analytics?user_id={user.id}&amp;day={date.today().isoformat()}#day"' in html
+
+
+def test_analytics_day_shows_the_sessions_behind_a_cell(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat", "Lunge"])
+        squat, lunge = workout.exercises
+        services.log_session(
+            workout.id, user.id, date(2026, 9, 1), 45,
+            {squat.id: 30, lunge.id: 20}, "good",
+            weights_by_exercise={squat.id: 40, lunge.id: services.NO_WEIGHT},
+            extra_exercises=[("Pull-up", 12)],
+            comment="Knee held up fine.",
+            category="judo",
+        )
+    html = client.get("/analytics?day=2026-09-01").data.decode()
+    panel = html[html.index('class="day-detail"') : html.index("Workouts performed")]
+    assert "Tuesday 01 Sep 2026" in panel
+    assert "Judo" in panel and "Leg day" in panel and "45 min" in panel
+    assert "felt good" in panel
+    assert "3 exercises" in panel  # two of the workout plus the extra
+    assert "62 repetitions" in panel  # 30 + 20 + 12
+    assert "1200 kg moved" in panel  # only the squats carried anything
+    assert "Squat" in panel and "Lunge" in panel and "Pull-up" in panel
+    assert "bodyweight" in panel  # the lunges carried nothing
+    assert "Knee held up fine." in panel
+
+
+def test_analytics_day_marks_the_selected_cell(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        services.log_session(
+            workout.id, user.id, date(2026, 9, 1), 45, {workout.exercises[0].id: 30},
+            "good",
+        )
+    html = client.get("/analytics?day=2026-09-01").data.decode()
+    activity = html[: html.index("Workouts performed")]
+    assert 'class="cell level-4 cat-weights selected"' in activity
+    assert activity.count("selected") == 1  # one day is open at a time
+
+
+def test_analytics_day_shows_sets_as_they_were_counted(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        services.log_session(
+            workout.id, user.id, date(2026, 9, 1), 45, {workout.exercises[0].id: 12},
+            "good", sets_by_exercise={workout.exercises[0].id: 4},
+        )
+    html = client.get("/analytics?day=2026-09-01").data.decode()
+    assert "4 × 12 = 48" in html
+
+
+def test_analytics_day_that_holds_nothing_says_so(client, app, user):
+    with app.app_context():
+        services.create_workout("Leg day", ["Squat"])
+    html = client.get("/analytics?day=2026-09-01").data.decode()
+    assert "Nothing logged on this day" in html
+
+
+def test_analytics_day_is_narrowed_to_the_selected_user(client, app, user, other_user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        services.log_session(
+            workout.id, other_user.id, date(2026, 9, 1), 45,
+            {workout.exercises[0].id: 30}, "good",
+        )
+        alex, sam = user.id, other_user.id
+    mine = client.get(f"/analytics?user_id={alex}&day=2026-09-01").data.decode()
+    assert "Nothing logged on this day by Alex" in mine
+    theirs = client.get(f"/analytics?user_id={sam}&day=2026-09-01").data.decode()
+    assert "Nothing logged" not in theirs
+    assert "Leg day" in theirs[theirs.index('class="day-detail"') :]
+
+
+def test_analytics_day_names_the_user_only_across_everyone(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        services.log_session(
+            workout.id, user.id, date(2026, 9, 1), 45, {workout.exercises[0].id: 30},
+            "good",
+        )
+        user_id = user.id
+    everyone = client.get("/analytics?day=2026-09-01").data.decode()
+    panel = everyone[everyone.index('class="day-detail"') : everyone.index("Workouts performed")]
+    assert "Alex" in panel
+    mine = client.get(f"/analytics?user_id={user_id}&day=2026-09-01").data.decode()
+    panel = mine[mine.index('class="day-detail"') : mine.index("Workouts performed")]
+    assert "Alex" not in panel  # the page already says whose day it is
+
+
+def test_analytics_user_filter_keeps_the_open_day(client, app, user):
+    html = client.get("/analytics?day=2026-09-01").data.decode()
+    form = html[html.index('class="user-filter"') : html.index("</form>")]
+    assert '<input type="hidden" name="day" value="2026-09-01">' in form
+
+
+def test_analytics_without_a_day_invites_a_click(client):
+    html = client.get("/analytics").data.decode()
+    assert "Pick a day on the map" in html
+    assert 'class="day-detail"' not in html
+
+
+def test_analytics_ignores_an_unparseable_day(client, app, user):
+    """Only reachable by hand: it renders the page without the panel."""
+    response = client.get("/analytics?day=not-a-date")
+    assert response.status_code == 200
+    assert b"Pick a day on the map" in response.data
 
 
 def test_analytics_page_sections_are_ordered(client):

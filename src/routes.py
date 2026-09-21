@@ -35,6 +35,7 @@ MODE_FIELD = "tracking_mode"  # counts the session in totals or in sets
 CATEGORY_FIELD = "category"  # the sort of sport, at the very top of the form
 NO_WEIGHT_VALUE = ""  # the weight dropdown's "no extra weight" option
 USER_FIELD = "user_id"  # picks the user on /track, filters /analytics
+DAY_FIELD = "day"  # the day of the activity map /analytics is opened on
 COMMENT_FIELD = "comment"  # the session's free-text note
 
 
@@ -255,13 +256,21 @@ def analytics():
     """Page 3: activity map, workouts performed, repetitions, feeling trend.
 
     A `user_id` in the query string narrows every section to that user; without
-    it — or with an id that no longer exists — the page covers everyone.
+    it — or with an id that no longer exists — the page covers everyone. A `day`
+    opens the activity map on that date, listing the sessions behind its cell;
+    that is a link on every day that has one, so the drill-down needs no JS.
     """
     user = services.get_user(_selected_user_id(request.args))
     user_id = user.id if user else None
+    day = _selected_day(request.args)
     return render_template(
         "analytics.html",
         activity=services.activity_map(user_id=user_id),
+        day=day,
+        day_field=DAY_FIELD,
+        # Nothing to list until a day is picked, and the query is skipped
+        # entirely rather than asked about a date that isn't there.
+        day_sessions=services.day_sessions(day, user_id=user_id) if day else [],
         frequency=services.workout_frequency(user_id=user_id),
         exercises=services.exercise_repetitions(user_id=user_id),
         trend=services.feeling_trend(user_id=user_id),
@@ -280,3 +289,17 @@ def _selected_user_id(args) -> int | None:
     """The user picked in the analytics dropdown, or None for 'All users'."""
     raw = args.get(USER_FIELD, "")
     return int(raw) if raw.isdigit() else None
+
+
+def _selected_day(args) -> date_type | None:
+    """The day the activity map was clicked on, or None when none was.
+
+    Anything that isn't a date — only reachable by editing the query string —
+    falls back to None, the way an unknown user id falls back to "All users",
+    so a hand-crafted link renders the page without its day panel rather than
+    raising.
+    """
+    try:
+        return date_type.fromisoformat(args.get(DAY_FIELD, ""))
+    except ValueError:
+        return None

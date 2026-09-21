@@ -535,6 +535,63 @@ def activity_map(
     return _calendar_weeks(counts, end, days, categories)
 
 
+def day_sessions(day: date_type, user_id: int | None = None) -> list[dict]:
+    """Everything logged on one day, in the order it was logged.
+
+    This is what a click on a cell of the activity map opens: the sessions
+    behind that one cell, for the user the page is filtered to. Each entry is
+    {"category", "category_label", "workout", "user", "duration_minutes",
+    "feeling", "comment", "repetitions", "weight", "exercises": [...]}, and
+    each exercise in turn is {"name", "repetitions", "sets",
+    "repetitions_per_set", "weight", "weight_moved", "extra"} — the same shape
+    the track form filled in, read back.
+
+    The figures come off the models rather than being re-summed in SQL, so a
+    day reports exactly what `WorkoutSession.total_repetitions`, `total_weight`
+    and `SessionExercise.weight_moved` say everywhere else. An exercise's
+    `weight` is None — not 0 — when it was done at bodyweight, exactly as the
+    column is, so the page can leave the weight out instead of printing 0. The
+    exercises keep the order they were logged in, which puts the workout's own
+    ahead of the extras. `comment` is None when the session carries no note.
+
+    Sessions come back oldest-logged first, the id standing in for the time of
+    day the way it does in `session_comments`. The list is empty when nothing
+    was logged that day — or nothing by that user, which is why a day that is
+    a link on one person's map need not be one on another's.
+    """
+    sessions = (
+        _for_user(WorkoutSession.query.filter(WorkoutSession.date == day), user_id)
+        .order_by(WorkoutSession.id)
+        .all()
+    )
+    return [
+        {
+            "category": session.category,
+            "category_label": session.category_label,
+            "workout": session.workout.name,
+            "user": session.user.name,
+            "duration_minutes": session.duration_minutes,
+            "feeling": session.feeling,
+            "comment": session.comment,
+            "repetitions": session.total_repetitions,
+            "weight": session.total_weight,
+            "exercises": [
+                {
+                    "name": log.name,
+                    "repetitions": log.repetitions,
+                    "sets": log.sets,
+                    "repetitions_per_set": log.repetitions_per_set,
+                    "weight": log.weight,
+                    "weight_moved": log.weight_moved,
+                    "extra": log.is_extra,
+                }
+                for log in session.logs
+            ],
+        }
+        for session in sessions
+    ]
+
+
 def workout_frequency(user_id: int | None = None) -> list[dict]:
     """How often each workout has been done and how it felt, most frequent first.
 

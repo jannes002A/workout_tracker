@@ -180,7 +180,7 @@ Last on the form is an optional free-text `comment` about the session. `log_sess
 strips it and stores a blank one as **NULL, not `""`**, which is what lets
 `session_comments` select the sessions that actually have something to say.
 
-`_repetitions_from_form`, `_weights_from_form`, `_sets_from_form` (all three over the shared `_by_exercise_id`) and `_extra_exercises_from_form` in `routes.py` do the field parsing; `REPS_FIELD_PREFIX`, `WEIGHT_FIELD_PREFIX`, `SETS_FIELD_PREFIX`, `EXTRA_NAME_FIELD`, `EXTRA_REPS_FIELD`, `EXTRA_WEIGHT_FIELD`, `EXTRA_SETS_FIELD`, `MODE_FIELD`, `CATEGORY_FIELD`, `USER_FIELD` and `COMMENT_FIELD` are the single source of the field-name conventions.
+`_repetitions_from_form`, `_weights_from_form`, `_sets_from_form` (all three over the shared `_by_exercise_id`) and `_extra_exercises_from_form` in `routes.py` do the field parsing; `REPS_FIELD_PREFIX`, `WEIGHT_FIELD_PREFIX`, `SETS_FIELD_PREFIX`, `EXTRA_NAME_FIELD`, `EXTRA_REPS_FIELD`, `EXTRA_WEIGHT_FIELD`, `EXTRA_SETS_FIELD`, `MODE_FIELD`, `CATEGORY_FIELD`, `USER_FIELD`, `DAY_FIELD` (the analytics query string's open day) and `COMMENT_FIELD` are the single source of the field-name conventions.
 
 ### Analytics page
 
@@ -189,6 +189,8 @@ form with a submit button, so it works without JS; `onchange` just submits it ea
 every section below is then computed for that user alone. No `user_id`, a blank one, or an
 id that no longer exists all fall back to "All users" — `_selected_user_id` in `routes.py`
 returns `None` and `services.get_user` returns `None` for an unknown id.
+
+A `day` in the query string opens the activity map on that date — `/analytics?user_id=N&day=2026-09-01#day` — which is what a click on a cell produces. `_selected_day` in `routes.py` parses it and falls back to `None` for anything that isn't a date, the way an unknown user id falls back to "All users", so a hand-edited link renders the page without its panel rather than raising. The user filter carries the open day through in a hidden field, so switching person keeps the day rather than closing it.
 
 Each analytics service takes `user_id: int | None = None`, and `_for_user(query, user_id)`
 applies the filter (before grouping, so it lands in the WHERE clause) or leaves the query
@@ -219,6 +221,23 @@ Five sections, in this order (a test asserts the order):
    macro in `analytics.html` draws the key beneath the grid — one full-shade
    cell per entry of `CATEGORIES`, so the legend cannot list a colour the map
    doesn't use.
+
+   Every day that holds a session is a **link to its own details**, rendered by
+   the `day_detail` macro directly under the map (so the page still has five
+   sections — the panel belongs to the map, not beside it). A day with nothing
+   on it stays a plain span: only the cells worth opening are clickable, which
+   is also why the grid needs no JS for any of this. `day_sessions(day,
+   user_id)` is what it lists — every session logged that day, oldest-logged
+   first, each with its sort of sport, workout, who trained, duration, feeling,
+   comment and one row per exercise: the name (tagged when it was an extra),
+   the repetitions — written `4 × 12 = 48` when the session was counted in
+   sets, since `sets` and `repetitions_per_set` survive to say so — and the
+   extra weight, or "bodyweight" where the column is NULL. The figures are read
+   off the model properties rather than re-summed in SQL, so a day can't
+   disagree with `total_repetitions`, `total_weight` or `weight_moved`
+   elsewhere on the page. The panel obeys the user filter like everything else,
+   which is why a day can be a link on one person's map and say "Nothing logged
+   on this day by …" once another is picked.
 2. `workout_frequency()` — sessions per workout, most frequent first, including workouts never performed. Each row also carries `feelings`, a count per value of `FEELINGS`, rendered as Good/Okay/Bad columns; the total session count above the table is just `frequency | sum(attribute='count')` in the template, not a service call.
 3. `feeling_trend()` — one entry per day for the last `TREND_DAYS` (30) days, oldest first; rest days have `sessions` 0 and `score`/`feeling` `None`, and a day with several sessions gets their average score with the label rounded half-up.
 4. `exercise_repetitions()` — one entry per exercise, grouped **by exercise name**, so an exercise appearing in several workouts (or logged as an extra) is reported once. `workouts` names where the repetitions actually **came from** — the workouts of the sessions the exercise was logged in — not every workout that happens to contain an exercise of that name. An extra belongs to no workout, so an exercise done only as an extra lists none; otherwise doing "Squats" as an extra during Arm day would label it "Leg day" and imply a workout that was never performed. An exercise nobody has performed has no sessions to go on and falls back to the workouts it belongs to, which is the only thing there is to say about it — that is what the "Not performed yet · Leg day" caption shows. Alongside the totals (`repetitions`, `weight`, `times`, `workouts`, `extra`) each row carries `heatmap`: its own calendar grid of the last `EXERCISE_HEATMAP_DAYS` (365) days, counting repetitions per day and summing them when an exercise landed twice on one date (possible across two sessions). `heatmap` is `None` for an exercise never performed, which the template renders as "Not performed yet" with no grid. Each row also carries `trend` from **`_repetition_trend`**: it splits the exercise's own history — first performed date to last — into two equal-length halves and compares the repetitions in each, giving `direction` (`"up"`, `"down"`, `"similar"` or `None`), both half totals, the `split` date and `change` as a fraction. Within ±`REPETITION_TREND_TOLERANCE` (15%) counts as `"similar"`; `direction` is `None` when everything falls on one date, and `change` is `None` when the earlier half is 0 (no baseline to be a percentage of), which the badge renders as a direction with no percentage. The trend reads the whole history, not just the heatmap window, so an old session can shape a trend whose grid looks empty.
@@ -269,7 +288,7 @@ Five sections, in this order (a test asserts the order):
 
 Both heatmaps come from **`_calendar_weeks(counts, end, days, categories=None)`**, which buckets a `{date: count}` mapping into Monday-first weeks of `{"date", "count", "level", "category"}` cells (`None` pads the first partial week), plus the window's `max` and `months` — one `{"label": "Sep 2025", "weeks": n}` per run of week columns, which the template lays out as the x axis above the grid. A week is attributed to the month of its first day, and the spans always sum to the number of columns.
 
-Month-label alignment is CSS, not magic numbers: `--cell` and `--cell-gap` define the grid, and each label's width is `calc(var(--weeks) * (var(--cell) + var(--cell-gap)) - var(--cell-gap))` with `--weeks` set inline. Change the cell size and the axis follows. Labels are deliberately not clipped — a full month is wide enough for "May 2026" at the current font size, and only the trailing partial month is narrow, with nothing after it to overlap. Levels are 0-4 relative to that grid's own busiest day, so an exercise's shading is relative to its own best day, not to other exercises. `categories` is the optional `{date: category}` mapping that colours the activity map; a grid built without it — every per-exercise one, where a cell counts repetitions and no one sort of sport owns it — gets `category` `None` on every cell and keeps the default green scale. Counts outside the window are ignored, so an all-time total can be non-zero while its grid is empty. The `heatmap` Jinja macro in `analytics.html` renders any of these grids, with the `unit` argument naming what a cell counts ("session" or "repetition"); a cell that carries a category also gets a `cat-<value>` class and has its label in the tooltip.
+Month-label alignment is CSS, not magic numbers: `--cell` and `--cell-gap` define the grid, and each label's width is `calc(var(--weeks) * (var(--cell) + var(--cell-gap)) - var(--cell-gap))` with `--weeks` set inline. Change the cell size and the axis follows. Labels are deliberately not clipped — a full month is wide enough for "May 2026" at the current font size, and only the trailing partial month is narrow, with nothing after it to overlap. Levels are 0-4 relative to that grid's own busiest day, so an exercise's shading is relative to its own best day, not to other exercises. `categories` is the optional `{date: category}` mapping that colours the activity map; a grid built without it — every per-exercise one, where a cell counts repetitions and no one sort of sport owns it — gets `category` `None` on every cell and keeps the default green scale. Counts outside the window are ignored, so an all-time total can be non-zero while its grid is empty. The `heatmap` Jinja macro in `analytics.html` renders any of these grids, with the `unit` argument naming what a cell counts ("session" or "repetition"); a cell that carries a category also gets a `cat-<value>` class and has its label in the tooltip. Its `linked` argument — true for the activity map alone — turns the non-empty days into `<a>` cells pointing at `?day=`, and the open day's cell carries a `selected` class; an exercise grid's days are never links, since a cell there is repetitions, not sessions to open.
 
 The shading itself is one CSS scale rather than five: `--heat` is the colour a
 grid is shaded towards, `--heat-0` the empty-day grey, and levels 1-3 are
