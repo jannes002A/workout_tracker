@@ -4,8 +4,10 @@ import pytest
 
 from src import services
 from src.models import (
-    CATEGORIES,
+    CATEGORY_PALETTE,
+    DEFAULT_CATEGORIES,
     DEFAULT_CATEGORY,
+    Category,
     Exercise,
     SessionExercise,
     User,
@@ -75,6 +77,98 @@ def test_get_user_unknown_or_missing_id(app):
     assert services.get_user(None) is None
 
 
+# --------------------------------------------------------------- categories
+
+
+def test_a_fresh_database_comes_with_the_default_sorts_of_sport(app):
+    """create_app seeds them, so the create page opens with a full dropdown."""
+    assert [(c.value, c.label, c.color) for c in services.get_all_categories()] == [
+        *DEFAULT_CATEGORIES
+    ]
+
+
+def test_ensure_categories_is_safe_to_run_again(app):
+    services.create_category("Running")
+    services.ensure_categories()
+    assert Category.query.count() == len(DEFAULT_CATEGORIES) + 1
+    assert [c.label for c in services.get_all_categories()][-1] == "Running"
+
+
+def test_ensure_categories_puts_a_missing_default_back_at_the_end(app):
+    """Deleting one and re-seeding must not disturb the sorts already there."""
+    db.session.delete(services.category_map()["judo"])
+    db.session.commit()
+    services.ensure_categories()
+    assert [c.value for c in services.get_all_categories()] == [
+        "weights",
+        "mobility",
+        "other",
+        "judo",
+    ]
+
+
+def test_category_map_is_keyed_by_value_in_order(app):
+    assert list(services.category_map()) == [v for v, _, _ in DEFAULT_CATEGORIES]
+    assert services.category_map()["judo"].label == "Judo"
+
+
+def test_category_labels_are_in_order(app):
+    assert services.category_labels() == [label for _, label, _ in DEFAULT_CATEGORIES]
+
+
+def test_create_category_adds_a_sort_of_sport_at_the_end(app):
+    category = services.create_category("  Running  ")
+    assert (category.value, category.label) == ("running", "Running")
+    assert services.get_all_categories()[-1].id == category.id
+
+
+def test_create_category_reduces_the_label_to_a_value(app):
+    assert services.create_category("Trail running!").value == "trail-running"
+
+
+def test_create_category_takes_the_first_unused_palette_colour(app):
+    first = services.create_category("Running")
+    second = services.create_category("Cycling")
+    assert (first.color, second.color) == CATEGORY_PALETTE[:2]
+    # and never one of the colours the seeded sorts of sport already wear
+    seeded = {color for _, _, color in DEFAULT_CATEGORIES}
+    assert not seeded & {first.color, second.color}
+
+
+def test_create_category_reuses_the_palette_once_it_runs_out(app):
+    for i in range(len(CATEGORY_PALETTE)):
+        services.create_category(f"Sport {i}")
+    assert services.create_category("One more").color in CATEGORY_PALETTE
+
+
+def test_create_category_requires_a_name(app):
+    with pytest.raises(ValidationError, match="Name the sort of sport"):
+        services.create_category("   ")
+    assert Category.query.count() == len(DEFAULT_CATEGORIES)
+
+
+def test_create_category_rejects_a_name_of_punctuation_alone(app):
+    with pytest.raises(ValidationError, match="letter or number"):
+        services.create_category("!!!")
+
+
+def test_create_category_rejects_too_long_a_name(app):
+    with pytest.raises(ValidationError, match="characters"):
+        services.create_category("x" * (services.MAX_CATEGORY_LABEL + 1))
+
+
+def test_create_category_rejects_a_duplicate_label_case_insensitively(app):
+    with pytest.raises(ValidationError, match="already a sort of sport"):
+        services.create_category(" judo ")
+    assert Category.query.count() == len(DEFAULT_CATEGORIES)
+
+
+def test_create_category_rejects_two_labels_that_reduce_to_one_value(app):
+    services.create_category("Trail running")
+    with pytest.raises(ValidationError, match="already a sort of sport"):
+        services.create_category("trail-running")
+
+
 # ------------------------------------------------------------ create_workout
 
 
@@ -117,6 +211,38 @@ def test_get_all_workouts_sorted_alphabetically(app):
 def test_create_workout_drops_duplicate_exercises(app):
     workout = services.create_workout("Leg day", ["Squat", "squat", " SQUAT ", "Lunge"])
     assert [m.name for m in workout.exercises] == ["Squat", "Lunge"]
+
+
+@pytest.mark.parametrize("category", [v for v, _, _ in DEFAULT_CATEGORIES])
+def test_create_workout_records_the_sort_of_sport(app, category):
+    workout = services.create_workout("Leg day", ["Squat"], category)
+    assert workout.category == category
+    assert workout.category_label == services.category_map()[category].label
+
+
+def test_create_workout_takes_a_sort_of_sport_added_on_the_page(app):
+    services.create_category("Running")
+    assert services.create_workout("Intervals", ["Sprint"], "running").category == (
+        "running"
+    )
+
+
+def test_create_workout_defaults_to_the_default_sort_of_sport(app):
+    """A caller that says nothing — or a POST without the field — still saves."""
+    assert services.create_workout("Leg day", ["Squat"]).category == DEFAULT_CATEGORY
+
+
+@pytest.mark.parametrize("category", ["running", "", "Judo", None])
+def test_create_workout_rejects_an_unknown_sort_of_sport(app, category):
+    with pytest.raises(ValidationError, match="Sort of sport must be one of"):
+        services.create_workout("Leg day", ["Squat"], category)
+    assert Workout.query.count() == 0
+
+
+def test_create_workout_names_the_choices_it_knows_in_the_error(app):
+    services.create_category("Running")
+    with pytest.raises(ValidationError, match="Weights, Judo, Mobility, Others, Running"):
+        services.create_workout("Leg day", ["Squat"], "chess")
 
 
 # ------------------------------------------------------- known_exercise_names
@@ -315,35 +441,26 @@ def test_log_session_invalid_feeling(app, workout, feeling, user):
         )
 
 
-@pytest.mark.parametrize("category", list(CATEGORIES))
-def test_log_session_records_the_sort_of_sport(app, workout, category, user):
-    session = services.log_session(
-        workout.id,
-        user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good",
-        category=category,
-    )
-    assert session.category == category
-    assert session.category_label == CATEGORIES[category]
-
-
-def test_log_session_defaults_to_the_default_sort_of_sport(app, workout, user):
-    """A caller that says nothing — or a POST without the field — still logs."""
+@pytest.mark.parametrize("category", [v for v, _, _ in DEFAULT_CATEGORIES])
+def test_log_session_takes_the_sort_of_sport_off_the_workout(app, category, user):
+    workout = services.create_workout("Leg day", ["Squat", "Lunge"], category)
     session = services.log_session(
         workout.id,
         user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good"
     )
+    assert session.category == category
+    assert session.category_label == services.category_map()[category].label
+
+
+def test_log_session_keeps_the_sort_of_sport_the_workout_had(app, workout, user):
+    """A workout re-labelled later must not recolour what is already logged."""
+    session = services.log_session(
+        workout.id,
+        user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good"
+    )
+    workout.category = "judo"
+    db.session.commit()
     assert session.category == DEFAULT_CATEGORY
-
-
-@pytest.mark.parametrize("category", ["running", "", "Judo", None])
-def test_log_session_rejects_an_unknown_sort_of_sport(app, workout, category, user):
-    with pytest.raises(ValidationError, match="Sort of sport"):
-        services.log_session(
-            workout.id,
-            user.id, date.today(), 45, reps_for(workout, 30, 20), "good",
-            category=category,
-        )
-    assert WorkoutSession.query.count() == 0
 
 
 @pytest.mark.parametrize("reps", [0, 1, 100, 120])
@@ -994,12 +1111,217 @@ def test_weight_moved_counts_every_repetition_of_every_set(app, workout, user):
     assert session.total_weight == 2400
 
 
+# ------------------------------------------------- update_session, session_form
+
+
+def test_get_session_by_id_or_none(app, workout, user):
+    session = services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good"
+    )
+    assert services.get_session(session.id) is session
+    assert services.get_session(session.id + 1) is None
+    assert services.get_session(None) is None
+
+
+def test_update_session_rewrites_every_field(app, workout, user, other_user):
+    session = services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good",
+        comment="Wrong on every count.",
+    )
+    services.update_session(
+        session.id,
+        workout.id, other_user.id, date(2026, 9, 3), 60,
+        reps_for(workout, 10, 12), "bad", comment="Corrected.",
+    )
+    assert WorkoutSession.query.count() == 1  # the same session, written again
+    again = services.get_session(session.id)
+    assert (again.user_id, again.date, again.duration_minutes) == (
+        other_user.id,
+        date(2026, 9, 3),
+        60,
+    )
+    assert (again.feeling, again.comment) == ("bad", "Corrected.")
+    assert again.total_repetitions == 22
+
+
+def test_update_session_replaces_the_exercise_logs(app, workout, user):
+    session = services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good",
+        extra_exercises=[("Pull-up", 12)],
+    )
+    services.update_session(
+        session.id,
+        workout.id, user.id, date(2026, 9, 1), 45, reps_for(workout, 5, 5), "good",
+        extra_exercises=[("Dip", 8)],
+    )
+    # the old logs are gone rather than piling up alongside the new ones
+    assert SessionExercise.query.count() == 3
+    assert {log.name for log in session.logs} == {"Squat", "Lunge", "Dip"}
+
+
+def test_update_session_can_change_the_workout(app, user):
+    """The point of the page: the wrong workout was picked to begin with."""
+    legs = services.create_workout("Leg day", ["Squat"])
+    randori = services.create_workout("Randori", ["Uchi-komi"], "judo")
+    session = services.log_session(
+        legs.id, user.id, date(2026, 9, 1), 45, {legs.exercises[0].id: 30}, "good"
+    )
+    services.update_session(
+        session.id,
+        randori.id, user.id, date(2026, 9, 1), 45,
+        {randori.exercises[0].id: 40}, "good",
+    )
+    assert session.workout.name == "Randori"
+    assert [(log.name, log.repetitions) for log in session.logs] == [("Uchi-komi", 40)]
+    # and with the workout, the sort of sport the day is coloured by
+    assert session.category == "judo"
+
+
+def test_update_session_keeps_the_weights_and_sets_it_is_given(app, workout, user):
+    squat, lunge = workout.exercises
+    session = services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {squat.id: 10, lunge.id: 10}, "good"
+    )
+    services.update_session(
+        session.id,
+        workout.id, user.id, date(2026, 9, 1), 45, {squat.id: 10, lunge.id: 10}, "good",
+        weights_by_exercise={squat.id: 60, lunge.id: services.NO_WEIGHT},
+        sets_by_exercise={squat.id: 4, lunge.id: services.NO_SETS},
+    )
+    logs = {log.name: log for log in session.logs}
+    assert (logs["Squat"].repetitions, logs["Squat"].sets) == (40, 4)
+    assert logs["Squat"].weight == 60
+    assert logs["Lunge"].weight is None
+
+
+def test_update_session_rejects_an_unknown_session(app, workout, user):
+    with pytest.raises(ValidationError, match="no longer exists"):
+        services.update_session(
+            404, workout.id, user.id, date(2026, 9, 1), 45,
+            reps_for(workout, 30, 20), "good",
+        )
+
+
+def test_update_session_leaves_the_session_alone_when_it_is_invalid(
+    app, workout, user
+):
+    """A rejected correction must not half-apply to what is already logged."""
+    session = services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, reps_for(workout, 30, 20), "good"
+    )
+    with pytest.raises(ValidationError):
+        services.update_session(
+            session.id,
+            workout.id, user.id, date(2026, 9, 3), 60,
+            reps_for(workout, 5, 5), "splendid",  # not a feeling
+        )
+    again = services.get_session(session.id)
+    assert (again.date, again.duration_minutes, again.feeling) == (
+        date(2026, 9, 1),
+        45,
+        "good",
+    )
+    assert again.total_repetitions == 50
+
+
+def test_session_form_reads_a_session_back_as_the_form_filled_it(app, workout, user):
+    squat, lunge = workout.exercises
+    session = services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {squat.id: 30, lunge.id: 20}, "okay",
+        weights_by_exercise={squat.id: 40, lunge.id: services.NO_WEIGHT},
+        extra_exercises=[("Pull-up", 12, 5)],
+        comment="Knee fine.",
+    )
+    form = services.session_form(session)
+    assert form["id"] == session.id
+    assert (form["workout_id"], form["user_id"]) == (workout.id, user.id)
+    assert (form["date"], form["duration_minutes"]) == (date(2026, 9, 1), 45)
+    assert (form["feeling"], form["comment"]) == ("okay", "Knee fine.")
+    assert form["tracking_mode"] == services.TOTAL_MODE
+    assert form["repetitions"] == {squat.id: 30, lunge.id: 20}
+    assert form["weights"] == {squat.id: 40, lunge.id: None}
+    assert form["sets"] == {squat.id: None, lunge.id: None}
+    assert form["extras"] == [
+        {"name": "Pull-up", "repetitions": 12, "weight": 5, "sets": None}
+    ]
+
+
+def test_session_form_reads_sets_back_per_set(app, workout, user):
+    """The dropdown means repetitions per set, so that is what comes back."""
+    squat, lunge = workout.exercises
+    session = services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {squat.id: 10, lunge.id: 12}, "good",
+        sets_by_exercise={squat.id: 4, lunge.id: 3},
+        extra_exercises=[("Pull-up", 6, services.NO_WEIGHT, 2)],
+    )
+    form = services.session_form(session)
+    assert form["tracking_mode"] == services.SETS_MODE
+    assert form["repetitions"] == {squat.id: 10, lunge.id: 12}
+    assert form["sets"] == {squat.id: 4, lunge.id: 3}
+    assert form["extras"][0]["repetitions"] == 6
+    assert form["extras"][0]["sets"] == 2
+
+
+def test_session_form_reads_a_total_inside_a_sets_session_as_one_set(
+    app, workout, user
+):
+    squat, lunge = workout.exercises
+    session = services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {squat.id: 10, lunge.id: 25}, "good",
+        sets_by_exercise={squat.id: 4},  # the lunges were counted as a total
+    )
+    form = services.session_form(session)
+    assert form["tracking_mode"] == services.SETS_MODE
+    # one set of 25 is the 25 that is stored, so re-saving changes nothing
+    assert (form["repetitions"][lunge.id], form["sets"][lunge.id]) == (25, 1)
+
+
+def test_session_form_survives_a_round_trip(app, workout, user):
+    """Re-saving an untouched form logs exactly what is already there."""
+    squat, lunge = workout.exercises
+    session = services.log_session(
+        workout.id, user.id, date(2026, 9, 1), 45, {squat.id: 10, lunge.id: 12}, "good",
+        weights_by_exercise={squat.id: 60, lunge.id: services.NO_WEIGHT},
+        sets_by_exercise={squat.id: 4, lunge.id: 3},
+        extra_exercises=[("Pull-up", 6, 5, 2)],
+    )
+    before = services.session_form(session)
+    services.update_session(
+        session.id,
+        before["workout_id"], before["user_id"], before["date"],
+        before["duration_minutes"], before["repetitions"], before["feeling"],
+        extra_exercises=[
+            (e["name"], e["repetitions"], e["weight"], e["sets"])
+            for e in before["extras"]
+        ],
+        comment=before["comment"],
+        weights_by_exercise=before["weights"],
+        sets_by_exercise=before["sets"],
+    )
+    assert services.session_form(session) == before
+
+
 def test_date_choices_span_and_order():
     today = date(2026, 9, 8)
     choices = services.date_choices(days_back=30, today=today)
     assert len(choices) == 31
     assert choices[0] == today
     assert choices[-1] == today - timedelta(days=30)
+
+
+def test_date_choices_add_a_date_the_window_misses():
+    """A session being corrected has to be offered its own date."""
+    today = date(2026, 9, 8)
+    old_day = date(2026, 1, 1)
+    choices = services.date_choices(days_back=30, today=today, include=old_day)
+    assert choices[-1] == old_day  # oldest, so last: the list stays sorted
+    assert len(choices) == 32
+
+
+def test_date_choices_do_not_repeat_a_date_already_in_the_window():
+    today = date(2026, 9, 8)
+    choices = services.date_choices(days_back=30, today=today, include=today)
+    assert len(choices) == 31
 
 
 def test_duration_and_repetition_choices_bounds():

@@ -33,6 +33,11 @@ def create_app(test_config: dict | None = None) -> Flask:
     db.init_app(app)
     with app.app_context():
         db.create_all()
+        # A fresh database starts with the four sorts of sport; one that has
+        # them (or extra ones added on the create page) is left alone.
+        from src.services import ensure_categories
+
+        ensure_categories()
 
     from src.routes import bp
 

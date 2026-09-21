@@ -2,11 +2,22 @@
 {% block title %}Create workout · Training Log{% endblock %}
 {% block content %}
 <h1>Create a workout</h1>
-<p class="lede">Name the workout and list every exercise that belongs to it.</p>
+<p class="lede">Name the workout, say what sort of sport it is, and list every
+exercise that belongs to it. Every session of the workout is logged as that
+sort of sport, and the activity map colours your days by it.</p>
 
 <form method="post" class="panel">
   <label for="name">Workout name</label>
   <input id="name" name="name" type="text" placeholder="e.g. Leg day" required>
+
+  {# The sort of sport the workout is. The options are the category table, so
+     one added below is here as soon as the page reloads. #}
+  <label for="{{ category_field }}">What sort of sport?</label>
+  <select id="{{ category_field }}" name="{{ category_field }}" required>
+    {% for c in categories.values() %}
+      <option value="{{ c.value }}" {% if c.value == default_category %}selected{% endif %}>{{ c.label }}</option>
+    {% endfor %}
+  </select>
 
   <label>Exercises</label>
   <div id="exercise-list">
@@ -27,12 +38,35 @@
   <button type="submit">Save workout</button>
 </form>
 
+{# Its own form, because a form cannot be nested in another: adding a sort of
+   sport posts to /categories and comes straight back here with the dropdown
+   above holding it. #}
+<form method="post" action="{{ url_for('main.add_category') }}" class="panel add-category">
+  <label for="{{ category_label_field }}">Not one of those? Add a sort of sport</label>
+  <p class="hint">It joins the dropdown above and gets a colour of its own on the
+  activity map.</p>
+  <div class="add-category-row">
+    <input id="{{ category_label_field }}" name="{{ category_label_field }}" type="text"
+           placeholder="e.g. Running" maxlength="{{ max_category_label }}" required>
+    <button type="submit">Add</button>
+  </div>
+  <p class="legend category-legend">
+    {% for c in categories.values() %}
+      <span class="cell level-4" style="--heat: {{ c.color }}"></span>{{ c.label }}
+    {% endfor %}
+  </p>
+</form>
+
 <h2>Your workouts</h2>
 {% if workouts %}
   <ul class="workout-list">
     {% for w in workouts %}
       <li>
         <strong>{{ w.name }}</strong>
+        {%- set c = categories.get(w.category) %}
+        <span class="workout-sport">
+          <span class="cell level-4" style="--heat: {{ c.color if c else 'var(--heat)' }}"></span>{{ w.category_label }}
+        </span>
         <span>{{ w.exercises | map(attribute='name') | join(', ') }}</span>
       </li>
     {% endfor %}

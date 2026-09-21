@@ -5,11 +5,21 @@
    options come from the same list the service validates against, ahead of
    the "no extra weight" choice — the default, which records the exercise in
    repetitions alone and leaves it out of every weight figure. #}
-{% macro weight_select(name, label, id=none) %}
+{% macro weight_select(name, label, id=none, selected=none) %}
   <select {% if id %}id="{{ id }}" {% endif %}name="{{ name }}" aria-label="{{ label }}">
-    <option value="{{ no_weight_value }}" selected>none</option>
+    <option value="{{ no_weight_value }}" {% if selected is none %}selected{% endif %}>none</option>
     {% for w in weights %}
-      <option value="{{ w }}">{{ w }}</option>
+      <option value="{{ w }}" {% if w == selected %}selected{% endif %}>{{ w }}</option>
+    {% endfor %}
+  </select>
+{% endmacro %}
+
+{# The repetitions dropdown. In sets mode the number means the repetitions of
+   one set, which is what a session opened for correction is read back as. #}
+{% macro reps_select(name, label, id=none, selected=none) %}
+  <select {% if id %}id="{{ id }}" {% endif %}name="{{ name }}" aria-label="{{ label }}">
+    {% for r in repetitions %}
+      <option value="{{ r }}" {% if r == (selected if selected is not none else 10) %}selected{% endif %}>{{ r }}</option>
     {% endfor %}
   </select>
 {% endmacro %}
@@ -17,33 +27,41 @@
 {# The sets dropdown, rendered ahead of every repetition dropdown. It only
    applies when the session is counted in sets — the script below hides and
    disables the column otherwise, and the server ignores it either way. #}
-{% macro sets_select(name, label, id=none) %}
+{% macro sets_select(name, label, id=none, selected=none) %}
   <select {% if id %}id="{{ id }}" {% endif %}class="sets-cell" name="{{ name }}" aria-label="{{ label }}">
     {% for s in set_choices %}
-      <option value="{{ s }}" {% if s == 3 %}selected{% endif %}>{{ s }}</option>
+      <option value="{{ s }}" {% if s == (selected if selected is not none else 3) %}selected{% endif %}>{{ s }}</option>
     {% endfor %}
   </select>
 {% endmacro %}
 
-{% macro extra_row() %}
+{# One extra-exercise row. `extra` fills it in with what was logged, for a
+   session being corrected; without one the row is the empty one the page has
+   always rendered. Clearing the name is what drops a row on saving. #}
+{% macro extra_row(extra=none) %}
   <div class="extra-row">
     <input name="{{ extra_name_field }}" type="text" placeholder="e.g. Pull-up"
-           aria-label="Extra exercise">
-    {{ sets_select(extra_sets_field, "Sets") }}
-    <select name="{{ extra_reps_field }}" aria-label="Repetitions">
-      {% for r in repetitions %}
-        <option value="{{ r }}" {% if r == 10 %}selected{% endif %}>{{ r }}</option>
-      {% endfor %}
-    </select>
-    {{ weight_select(extra_weight_field, "Extra weight in " ~ weight_unit) }}
+           aria-label="Extra exercise" {% if extra %}value="{{ extra.name }}"{% endif %}>
+    {{ sets_select(extra_sets_field, "Sets", selected=extra.sets if extra else none) }}
+    {{ reps_select(extra_reps_field, "Repetitions",
+         selected=extra.repetitions if extra else none) }}
+    {{ weight_select(extra_weight_field, "Extra weight in " ~ weight_unit,
+         selected=extra.weight if extra else none) }}
     <button type="button" class="ghost"
             onclick="this.closest('.extra-row').remove()">Remove</button>
   </div>
 {% endmacro %}
 
 {% block content %}
-<h1>Track a session</h1>
-<p class="lede">Pick what sort of sport it was, who trained and which workout they did, then record how many repetitions they did of each of its exercises — as a total, or as sets of so many repetitions each — and how much extra weight they carried ({{ weight_unit }}) — leave it at <em>none</em> for bodyweight, and the exercise is counted in repetitions only, with no weight moved.</p>
+{% if editing %}
+  <h1>Correct a session</h1>
+  <p class="lede">Everything this session was logged with, ready to be changed —
+  including which workout it was. Saving writes this session again rather than
+  adding another one.</p>
+{% else %}
+  <h1>Track a session</h1>
+  <p class="lede">Pick who trained and which workout they did — the workout says what sort of sport the session was — then record how many repetitions they did of each of its exercises — as a total, or as sets of so many repetitions each — and how much extra weight they carried ({{ weight_unit }}) — leave it at <em>none</em> for bodyweight, and the exercise is counted in repetitions only, with no weight moved.</p>
+{% endif %}
 
 {% if not users %}
   <p class="empty">You need a user first — <a href="{{ url_for('main.users') }}">add one</a>, then come back to track their sessions.</p>
@@ -51,33 +69,26 @@
   <p class="empty">You need a workout first — <a href="{{ url_for('main.create') }}">create one</a>, then come back to track it.</p>
 {% else %}
 <form method="post" class="panel" id="track-form">
-  {# The sort of sport comes first: it describes the whole session, and the
-     analytics page colours the activity map by it. #}
-  <label for="{{ category_field }}">What sort of sport?</label>
-  <select id="{{ category_field }}" name="{{ category_field }}" required>
-    {% for value, label in categories.items() %}
-      <option value="{{ value }}" {% if value == default_category %}selected{% endif %}>{{ label }}</option>
-    {% endfor %}
-  </select>
-
   <label for="{{ user_field }}">Who did it?</label>
   <select id="{{ user_field }}" name="{{ user_field }}" required>
     {% for u in users %}
-      <option value="{{ u.id }}">{{ u.name }}</option>
+      <option value="{{ u.id }}" {% if editing and u.id == editing.user_id %}selected{% endif %}>{{ u.name }}</option>
     {% endfor %}
   </select>
 
+  {# Each workout names its sort of sport, which is what the session is logged
+     as — it is picked on the create page, not here. #}
   <label for="workout_id">Workout</label>
   <select id="workout_id" name="workout_id" required>
     {% for w in workouts %}
-      <option value="{{ w.id }}">{{ w.name }}</option>
+      <option value="{{ w.id }}" {% if editing and w.id == editing.workout_id %}selected{% endif %}>{{ w.name }} · {{ w.category_label }}</option>
     {% endfor %}
   </select>
 
   <label for="{{ mode_field }}">How are repetitions counted?</label>
   <select id="{{ mode_field }}" name="{{ mode_field }}">
     {% for value, label in tracking_modes.items() %}
-      <option value="{{ value }}" {% if value == default_tracking_mode %}selected{% endif %}>{{ label }}</option>
+      <option value="{{ value }}" {% if value == (editing.tracking_mode if editing else default_tracking_mode) %}selected{% endif %}>{{ label }}</option>
     {% endfor %}
   </select>
   <p class="hint">Counted in sets, each exercise gets a number of sets and the
@@ -88,7 +99,7 @@
       <label for="date">Date</label>
       <select id="date" name="date">
         {% for d in dates %}
-          <option value="{{ d.isoformat() }}">{{ d.strftime('%a %d %b %Y') }}</option>
+          <option value="{{ d.isoformat() }}" {% if editing and d == editing.date %}selected{% endif %}>{{ d.strftime('%a %d %b %Y') }}</option>
         {% endfor %}
       </select>
     </div>
@@ -96,7 +107,7 @@
       <label for="duration">Length (minutes)</label>
       <select id="duration" name="duration">
         {% for m in durations %}
-          <option value="{{ m }}" {% if m == 45 %}selected{% endif %}>{{ m }}</option>
+          <option value="{{ m }}" {% if m == (editing.duration_minutes if editing else 45) %}selected{% endif %}>{{ m }}</option>
         {% endfor %}
       </select>
     </div>
@@ -110,21 +121,25 @@
         <span class="reps-head">reps</span><span>extra {{ weight_unit }}</span>
       </div>
       {% for m in w.exercises %}
+        {#- what this exercise was logged with, for the workout being
+            corrected; the other workouts' fields open on their defaults #}
         <div class="exercise-row">
           <label for="{{ reps_prefix }}{{ m.id }}">{{ m.name }}</label>
           {{ sets_select(
                sets_prefix ~ m.id,
                "Sets of " ~ m.name,
-               id=sets_prefix ~ m.id) }}
-          <select id="{{ reps_prefix }}{{ m.id }}" name="{{ reps_prefix }}{{ m.id }}">
-            {% for r in repetitions %}
-              <option value="{{ r }}" {% if r == 10 %}selected{% endif %}>{{ r }}</option>
-            {% endfor %}
-          </select>
+               id=sets_prefix ~ m.id,
+               selected=editing.sets.get(m.id) if editing else none) }}
+          {{ reps_select(
+               reps_prefix ~ m.id,
+               "Repetitions of " ~ m.name,
+               id=reps_prefix ~ m.id,
+               selected=editing.repetitions.get(m.id) if editing else none) }}
           {{ weight_select(
                weight_prefix ~ m.id,
                "Extra weight for " ~ m.name ~ " in " ~ weight_unit,
-               id=weight_prefix ~ m.id) }}
+               id=weight_prefix ~ m.id,
+               selected=editing.weights.get(m.id) if editing else none) }}
         </div>
       {% endfor %}
     </fieldset>
@@ -139,7 +154,11 @@
       <span>exercise</span><span class="sets-cell">sets</span>
       <span class="reps-head">reps</span><span>extra {{ weight_unit }}</span><span></span>
     </div>
-    <div id="extra-list">{{ extra_row() }}</div>
+    {#- the extras already logged, then an empty row to add another #}
+    <div id="extra-list">
+      {% if editing %}{% for extra in editing.extras %}{{ extra_row(extra) }}{% endfor %}{% endif %}
+      {{ extra_row() }}
+    </div>
     <button type="button" class="ghost" onclick="addExtraExercise()">Add another exercise</button>
   </fieldset>
   <template id="extra-row-template">{{ extra_row() }}</template>
@@ -148,7 +167,7 @@
   <div class="feelings">
     {% for f in feelings %}
       <label class="feeling">
-        <input type="radio" name="feeling" value="{{ f }}" {% if f == 'okay' %}checked{% endif %}>
+        <input type="radio" name="feeling" value="{{ f }}" {% if f == (editing.feeling if editing else 'okay') %}checked{% endif %}>
         <span>{{ f }}</span>
       </label>
     {% endfor %}
@@ -159,9 +178,16 @@
   at the bottom of the analytics page.</p>
   <textarea id="{{ comment_field }}" name="{{ comment_field }}" rows="3"
             maxlength="{{ max_comment_length }}"
-            placeholder="e.g. Felt strong on the last set, knee was fine."></textarea>
+            placeholder="e.g. Felt strong on the last set, knee was fine.">{{ editing.comment if editing }}</textarea>
 
-  <button type="submit">Log session</button>
+  {% if editing %}
+    <div class="form-actions">
+      <button type="submit">Save changes</button>
+      <a class="cancel" href="{{ url_for('main.analytics', day=editing.date.isoformat(), _anchor='day') }}">Cancel</a>
+    </div>
+  {% else %}
+    <button type="submit">Log session</button>
+  {% endif %}
 </form>
 
 <script>

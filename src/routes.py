@@ -3,7 +3,7 @@ from datetime import date as date_type
 from flask import Blueprint, flash, redirect, render_template, request, url_for
 
 from src import services
-from src.models import CATEGORIES, DEFAULT_CATEGORY, FEELINGS
+from src.models import DEFAULT_CATEGORY, FEELINGS
 from src.services import (
     DEFAULT_SETS,
     DEFAULT_TRACKING_MODE,
@@ -11,6 +11,7 @@ from src.services import (
     DURATION_CHOICES,
     NO_WEIGHT,
     MAX_AGE,
+    MAX_CATEGORY_LABEL,
     MAX_COMMENT_LENGTH,
     MIN_AGE,
     REPETITION_CHOICES,
@@ -32,7 +33,8 @@ EXTRA_REPS_FIELD = "extra-reps"  # done in this session only
 EXTRA_WEIGHT_FIELD = "extra-weight"
 EXTRA_SETS_FIELD = "extra-sets"
 MODE_FIELD = "tracking_mode"  # counts the session in totals or in sets
-CATEGORY_FIELD = "category"  # the sort of sport, at the very top of the form
+CATEGORY_FIELD = "category"  # the workout's sort of sport, on the create form
+CATEGORY_LABEL_FIELD = "label"  # names the sort of sport being added
 NO_WEIGHT_VALUE = ""  # the weight dropdown's "no extra weight" option
 USER_FIELD = "user_id"  # picks the user on /track, filters /analytics
 DAY_FIELD = "day"  # the day of the activity map /analytics is opened on
@@ -82,8 +84,16 @@ def create():
             workout = services.create_workout(
                 request.form.get("name", ""),
                 request.form.getlist("exercises"),
+                # Missing entirely — a hand-crafted POST — is the default sort
+                # of sport; a value the dropdown cannot have produced is an
+                # error, the way an unknown feeling is on the track page.
+                request.form.get(CATEGORY_FIELD, DEFAULT_CATEGORY),
             )
-            flash(f"Workout '{workout.name}' saved.", "success")
+            flash(
+                f"Workout '{workout.name}' saved "
+                f"({workout.category_label.lower()}).",
+                "success",
+            )
             return redirect(url_for("main.create"))
         except ValidationError as exc:
             flash(str(exc), "error")
@@ -91,7 +101,30 @@ def create():
         "create.html",
         workouts=services.get_all_workouts(),
         known_exercises=services.known_exercise_names(),
+        categories=services.category_map(),
+        default_category=DEFAULT_CATEGORY,
+        category_field=CATEGORY_FIELD,
+        category_label_field=CATEGORY_LABEL_FIELD,
+        max_category_label=MAX_CATEGORY_LABEL,
     )
+
+
+@bp.route("/categories", methods=["POST"])
+def add_category():
+    """Add a sort of sport, from the small form under the create page's panel.
+
+    A page of its own would be a page with one field on it, and the dropdown
+    it fills is on /create, so this posts from there and goes straight back —
+    the new sort of sport then being one of the dropdown's options.
+    """
+    try:
+        category = services.create_category(
+            request.form.get(CATEGORY_LABEL_FIELD, "")
+        )
+        flash(f"Sort of sport '{category.label}' added.", "success")
+    except ValidationError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("main.create"))
 
 
 def _repetitions_from_form(form) -> dict[int, int]:
@@ -182,11 +215,24 @@ def _extra_exercises_from_form(form) -> list[tuple[str, int, int | None, int | N
 
 
 @bp.route("/track", methods=["GET", "POST"])
-def track():
-    """Page 2: log a performed workout session, exercise by exercise."""
+@bp.route("/track/<int:session_id>", methods=["GET", "POST"])
+def track(session_id: int | None = None):
+    """Page 2: log a performed workout session, exercise by exercise.
+
+    With a `session_id` — the "correct this session" link on the analytics
+    page's day panel — the same page and the same form open on a session that
+    already exists, every field filled in with what was logged, and saving
+    writes that session again instead of adding another. A session id nothing
+    answers to takes the user back to the analytics page with a message, the
+    way an unknown day there renders without its panel.
+    """
+    editing = services.get_session(session_id)
+    if session_id is not None and editing is None:
+        flash("That session no longer exists.", "error")
+        return redirect(url_for("main.analytics"))
     if request.method == "POST":
         try:
-            session = services.log_session(
+            fields = dict(
                 workout_id=int(request.form.get("workout_id", 0)),
                 user_id=int(request.form.get(USER_FIELD, 0)),
                 session_date=date_type.fromisoformat(request.form.get("date", "")),
@@ -197,25 +243,21 @@ def track():
                 feeling=request.form.get("feeling", ""),
                 extra_exercises=_extra_exercises_from_form(request.form),
                 comment=request.form.get(COMMENT_FIELD, ""),
-                # Missing entirely — a hand-crafted POST — is the default sort
-                # of sport; a value the dropdown cannot have produced is an
-                # error, the way an unknown feeling is.
-                category=request.form.get(CATEGORY_FIELD, DEFAULT_CATEGORY),
             )
-            # A session of nothing but bodyweight exercises has no weight to
-            # report, so it is summed up in repetitions alone.
-            moved = (
-                f", {session.total_weight} {WEIGHT_UNIT}"
-                if session.total_weight
-                else ""
-            )
-            flash(
-                f"Logged {session.workout.name} for {session.user.name} on "
-                f"{session.date.isoformat()} "
-                f"({session.category_label.lower()}, "
-                f"{session.total_repetitions} repetitions{moved}).",
-                "success",
-            )
+            if editing:
+                session = services.update_session(editing.id, **fields)
+                flash(f"Updated {_session_summary(session)}", "success")
+                # Back to the day it now falls on, which is where the link in
+                # was: the correction is there to be seen.
+                return redirect(
+                    url_for(
+                        "main.analytics",
+                        **{DAY_FIELD: session.date.isoformat()},
+                        _anchor="day",
+                    )
+                )
+            session = services.log_session(**fields)
+            flash(f"Logged {_session_summary(session)}", "success")
             return redirect(url_for("main.track"))
         except (ValidationError, ValueError) as exc:
             flash(str(exc), "error")
@@ -224,10 +266,12 @@ def track():
         workouts=services.get_all_workouts(),
         users=services.get_all_users(),
         user_field=USER_FIELD,
-        categories=CATEGORIES,
-        default_category=DEFAULT_CATEGORY,
-        category_field=CATEGORY_FIELD,
-        dates=services.date_choices(),
+        # The form's own fields, read back off the session being corrected —
+        # None when tracking a new one, which is what the template branches on.
+        editing=services.session_form(editing) if editing else None,
+        # A session older than the dropdown reaches still has to be offered
+        # its own date, or saving would silently move it.
+        dates=services.date_choices(include=editing.date if editing else None),
         durations=DURATION_CHOICES,
         repetitions=REPETITION_CHOICES,
         weights=WEIGHT_CHOICES,
@@ -248,6 +292,19 @@ def track():
         extra_sets_field=EXTRA_SETS_FIELD,
         comment_field=COMMENT_FIELD,
         max_comment_length=MAX_COMMENT_LENGTH,
+    )
+
+
+def _session_summary(session) -> str:
+    """What a session flashes as once it is saved, logged or corrected."""
+    # A session of nothing but bodyweight exercises has no weight to report,
+    # so it is summed up in repetitions alone.
+    moved = f", {session.total_weight} {WEIGHT_UNIT}" if session.total_weight else ""
+    return (
+        f"{session.workout.name} for {session.user.name} on "
+        f"{session.date.isoformat()} "
+        f"({session.category_label.lower()}, "
+        f"{session.total_repetitions} repetitions{moved})."
     )
 
 
@@ -280,7 +337,7 @@ def analytics():
         users=services.get_all_users(),
         user=user,
         user_field=USER_FIELD,
-        categories=CATEGORIES,
+        categories=services.category_map(),
         weight_unit=WEIGHT_UNIT,
     )
 

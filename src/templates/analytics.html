@@ -24,15 +24,17 @@
         <div class="heatmap-week">
           {% for cell in week %}
             {% if cell %}
+              {#- the sort of sport the day was, which carries its own colour;
+                  a grid without categories keeps the default scale #}
+              {%- set category = categories.get(cell.category) if cell.category else none -%}
               {%- set classes = "cell level-" ~ cell.level
-                   ~ (" cat-" ~ cell.category if cell.category else "")
                    ~ (" selected" if day and cell.date == day.isoformat() else "") -%}
               {%- set caption = cell.date ~ ": " ~ cell.count ~ " " ~ unit ~ ("" if cell.count == 1 else "s")
-                   ~ (" · " ~ categories.get(cell.category, cell.category) if cell.category else "") -%}
+                   ~ (" · " ~ (category.label if category else cell.category) if cell.category else "") -%}
               {% if linked and cell.count %}
-                <a class="{{ classes }}" href="{{ url_for('main.analytics', user_id=(user.id if user else none), day=cell.date, _anchor='day') }}" title="{{ caption }}" aria-label="{{ caption }}"></a>
+                <a class="{{ classes }}"{% if category %} style="--heat: {{ category.color }}"{% endif %} href="{{ url_for('main.analytics', user_id=(user.id if user else none), day=cell.date, _anchor='day') }}" title="{{ caption }}" aria-label="{{ caption }}"></a>
               {% else %}
-                <span class="{{ classes }}" title="{{ caption }}"></span>
+                <span class="{{ classes }}"{% if category %} style="--heat: {{ category.color }}"{% endif %} title="{{ caption }}"></span>
               {% endif %}
             {% else %}
               <span class="cell pad"></span>
@@ -63,11 +65,12 @@
 
 {# Which colour on the activity map is which sort of sport. The swatches are
    cells at full shade, so they are exactly the colour of a day's busiest
-   level, and the order is the one CATEGORIES sets. #}
+   level, and the order and the colours are the category table's own — so the
+   legend cannot name a sort of sport the map doesn't draw. #}
 {% macro category_legend() %}
   <p class="legend category-legend">
-    {% for value, label in categories.items() %}
-      <span class="cell level-4 cat-{{ value }}"></span>{{ label }}
+    {% for c in categories.values() %}
+      <span class="cell level-4" style="--heat: {{ c.color }}"></span>{{ c.label }}
     {% endfor %}
   </p>
 {% endmacro %}
@@ -85,7 +88,8 @@
         {% for s in day_sessions %}
           <article class="day-session">
             <p class="day-session-meta">
-              <span class="cell level-4 cat-{{ s.category }}"></span>{{ s.category_label }}
+              {%- set c = categories.get(s.category) %}
+              <span class="cell level-4"{% if c %} style="--heat: {{ c.color }}"{% endif %}></span>{{ s.category_label }}
               · {{ s.workout }}
               {#- with a user picked the page already says whose day this is #}
               {%- if not user %} · {{ s.user }}{% endif %}
@@ -116,6 +120,11 @@
               </tbody>
             </table>
             {% if s.comment %}<p class="comment-text">{{ s.comment }}</p>{% endif %}
+            {#- the track form again, filled in with this session, for when
+                something about it was logged wrongly #}
+            <p class="day-session-edit">
+              <a href="{{ url_for('main.track', session_id=s.id) }}">Correct this session</a>
+            </p>
           </article>
         {% endfor %}
       {% else %}

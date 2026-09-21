@@ -5,19 +5,23 @@ Keeping logic out of the route handlers makes it easy to test without HTTP.
 """
 
 import math
+import re
 from datetime import date as date_type
 from datetime import timedelta
 
 from src.models import (
-    CATEGORIES,
+    CATEGORY_PALETTE,
+    DEFAULT_CATEGORIES,
     DEFAULT_CATEGORY,
     FEELING_SCORES,
     FEELINGS,
+    Category,
     Exercise,
     SessionExercise,
     User,
     Workout,
     WorkoutSession,
+    category_by_value,
     db,
 )
 
@@ -45,6 +49,7 @@ EXERCISE_HEATMAP_DAYS = 365  # window of each per-exercise heatmap
 REPETITION_TREND_TOLERANCE = 0.15  # within ±15% counts as holding steady
 COMMENT_LIMIT = 5  # how many session notes the analytics page lists
 MIN_AGE, MAX_AGE = 1, 120  # bounds of the age field, and of its error message
+MAX_CATEGORY_LABEL = 40  # cap on the name of a sort of sport, and its input's
 MAX_COMMENT_LENGTH = 2000  # cap on a session's free-text note
 
 
@@ -83,11 +88,139 @@ def get_user(user_id: int | None) -> User | None:
     return db.session.get(User, user_id)
 
 
+# ------------------------------------------------------------- categories
+
+
+def ensure_categories() -> None:
+    """Put the four sorts of sport of DEFAULT_CATEGORIES in an empty table.
+
+    Called once per app from `create_app`, right after `db.create_all()`, so a
+    fresh database comes with Weights, Judo, Mobility and Others rather than an
+    empty dropdown. A sort of sport already there is left exactly as it is, and
+    the ones added on the create page are never touched, so this is safe to run
+    at every startup.
+    """
+    empty = not db.session.query(Category.id).first()
+    added = False
+    for index, (value, label, color) in enumerate(DEFAULT_CATEGORIES):
+        if category_by_value(value):
+            continue
+        db.session.add(
+            Category(
+                value=value,
+                label=label,
+                color=color,
+                # An empty table takes the order of DEFAULT_CATEGORIES; a
+                # default put back into a table that has grown its own sorts
+                # of sport goes after them instead of taking their place.
+                position=index if empty else _next_position(),
+            )
+        )
+        added = True
+    if added:
+        db.session.commit()
+
+
+def _next_position() -> int:
+    """The position a sort of sport added now takes: last in the list."""
+    highest = db.session.query(db.func.max(Category.position)).scalar()
+    return 0 if highest is None else highest + 1
+
+
+def get_all_categories() -> list[Category]:
+    """Every sort of sport, in the order the dropdowns and the legend list them."""
+    return Category.query.order_by(Category.position, Category.id).all()
+
+
+def category_map() -> dict[str, Category]:
+    """Every sort of sport as value -> row, in that same order.
+
+    This is what the templates are handed: they look a stored value up in it to
+    draw a label and a colour, and iterate it for the dropdowns and the map's
+    legend, so neither can name a sort of sport the table doesn't hold.
+    """
+    return {category.value: category for category in get_all_categories()}
+
+
+def category_labels() -> list[str]:
+    """The labels, in order — what an error message names the choices with."""
+    return [category.label for category in get_all_categories()]
+
+
+def create_category(label: str) -> Category:
+    """Add a sort of sport, e.g. 'Running', from the create page.
+
+    The stored `value` is derived from the label, so the label is what the user
+    types and the value is what workouts and sessions carry. Labels are unique
+    compared case-insensitively, and so are the values they reduce to, which is
+    what stops 'Trail running' and 'trail-running' becoming two sorts of sport
+    that colour the same.
+
+    The colour is assigned rather than asked for: the first of CATEGORY_PALETTE
+    that no category is using yet, so a new sort of sport is told apart from the
+    ones already on the activity map without a colour picker on the form.
+    """
+    label = (label or "").strip()
+    if not label:
+        raise ValidationError("Name the sort of sport you want to add.")
+    if len(label) > MAX_CATEGORY_LABEL:
+        raise ValidationError(
+            f"Keep the sort of sport under {MAX_CATEGORY_LABEL} characters."
+        )
+    value = _category_value(label)
+    if not value:
+        raise ValidationError("Use at least one letter or number in the name.")
+    clash = Category.query.filter(
+        db.or_(db.func.lower(Category.label) == label.lower(), Category.value == value)
+    ).first()
+    if clash:
+        raise ValidationError(f"'{clash.label}' is already a sort of sport.")
+
+    category = Category(
+        value=value,
+        label=label,
+        color=_next_category_color(),
+        position=_next_position(),
+    )
+    db.session.add(category)
+    db.session.commit()
+    return category
+
+
+def _category_value(label: str) -> str:
+    """The stored value a label reduces to: lowercase, punctuation as hyphens."""
+    return re.sub(r"\W+", "-", label.casefold(), flags=re.UNICODE).strip("-")
+
+
+def _next_category_color() -> str:
+    """The colour a sort of sport added now gets.
+
+    The first palette entry nothing is using, so the seeded four keep their own
+    colours and every addition looks different — until the palette is used up,
+    at which point it starts over rather than leaving a category colourless.
+    """
+    taken = {color for (color,) in db.session.query(Category.color).distinct()}
+    free = [color for color in CATEGORY_PALETTE if color not in taken]
+    if free:
+        return free[0]
+    return CATEGORY_PALETTE[Category.query.count() % len(CATEGORY_PALETTE)]
+
+
 # ---------------------------------------------------------------- workouts
 
 
-def create_workout(name: str, exercise_names: list[str]) -> Workout:
-    """Create a workout with its exercises. Empty exercise names are dropped."""
+def create_workout(
+    name: str, exercise_names: list[str], category: str = DEFAULT_CATEGORY
+) -> Workout:
+    """Create a workout with its exercises. Empty exercise names are dropped.
+
+    `category` is the sort of sport the workout is — the value of one of the
+    `Category` rows, picked from the dropdown at the top of the create form.
+    Every session of the workout is logged under it. It defaults to
+    DEFAULT_CATEGORY, so a caller — or a hand-crafted POST — that leaves it out
+    still creates a workout; a value the dropdown cannot have produced is
+    rejected the way an unknown feeling is on the track page.
+    """
     name = (name or "").strip()
     exercises, seen = [], set()
     for raw in exercise_names:
@@ -102,8 +235,14 @@ def create_workout(name: str, exercise_names: list[str]) -> Workout:
         raise ValidationError("Add at least one exercise.")
     if Workout.query.filter_by(name=name).first():
         raise ValidationError(f"A workout named '{name}' already exists.")
+    if not category_by_value(category):
+        # Built from the labels the dropdown is filled with, so the message and
+        # the options it names cannot drift apart.
+        raise ValidationError(
+            f"Sort of sport must be one of {', '.join(category_labels())}."
+        )
 
-    workout = Workout(name=name)
+    workout = Workout(name=name, category=category)
     workout.exercises = [Exercise(name=m) for m in exercises]
     db.session.add(workout)
     db.session.commit()
@@ -193,9 +332,12 @@ def log_session(
     comment: str = "",
     weights_by_exercise: dict[int, int | None] | None = None,
     sets_by_exercise: dict[int, int | None] | None = None,
-    category: str = DEFAULT_CATEGORY,
 ) -> WorkoutSession:
     """Record a performed workout by one user, exercise by exercise.
+
+    `update_session` takes exactly these arguments and applies them to a
+    session that already exists, so what the track form can log it can also
+    correct; `_fill_session` is the half the two share.
 
     `repetitions_by_exercise` maps exercise id -> repetitions. Every exercise of
     the workout must be present; ids belonging to other workouts are ignored,
@@ -227,12 +369,109 @@ def log_session(
     one is stored as NULL rather than an empty string, so `session_comments` can
     pick out the sessions that actually have something to say.
 
-    `category` is the sort of sport the session was, one of CATEGORIES. It
-    describes the whole session rather than any one exercise, which is why the
-    track page asks for it at the very top of the form, and it is what the
-    activity map colours a day by. It defaults to DEFAULT_CATEGORY, so a caller
-    — or a hand-crafted POST — that leaves it out records a session all the
-    same; an unknown value is rejected the way an unknown feeling is.
+    The session's sort of sport is not asked for: it is copied from the
+    workout, which is where it is picked (on the create page). Storing it on
+    the session is what keeps the activity map honest about the past — a
+    workout given a different sort of sport later does not recolour the days it
+    was already performed on.
+    """
+    session = WorkoutSession()
+    _fill_session(
+        session,
+        workout_id=workout_id,
+        user_id=user_id,
+        session_date=session_date,
+        duration_minutes=duration_minutes,
+        repetitions_by_exercise=repetitions_by_exercise,
+        feeling=feeling,
+        extra_exercises=extra_exercises,
+        comment=comment,
+        weights_by_exercise=weights_by_exercise,
+        sets_by_exercise=sets_by_exercise,
+    )
+    db.session.add(session)
+    db.session.commit()
+    return session
+
+
+def update_session(
+    session_id: int,
+    workout_id: int,
+    user_id: int,
+    session_date: date_type,
+    duration_minutes: int,
+    repetitions_by_exercise: dict[int, int],
+    feeling: str,
+    extra_exercises: (
+        list[tuple[str, int]]
+        | list[tuple[str, int, int | None]]
+        | list[tuple[str, int, int | None, int | None]]
+        | None
+    ) = None,
+    comment: str = "",
+    weights_by_exercise: dict[int, int | None] | None = None,
+    sets_by_exercise: dict[int, int | None] | None = None,
+) -> WorkoutSession:
+    """Write a session that was logged wrongly again, from the same fields.
+
+    This is the track form opened on a session that already exists: every
+    argument means what it means in `log_session`, and the session ends up as
+    if it had been logged that way in the first place. Nothing is patched in
+    place — the exercise logs are replaced wholesale (the old ones are deleted
+    by the cascade), which is what lets the workout itself be corrected: the
+    logs then belong to the exercises of the workout now chosen, and the sort
+    of sport is copied from it again.
+
+    The session keeps its id, so the day it now falls on is the only place it
+    shows up. An id nothing answers to is a ValidationError rather than a
+    crash, the way an unknown workout is.
+    """
+    session = get_session(session_id)
+    if session is None:
+        raise ValidationError("That session no longer exists.")
+    _fill_session(
+        session,
+        workout_id=workout_id,
+        user_id=user_id,
+        session_date=session_date,
+        duration_minutes=duration_minutes,
+        repetitions_by_exercise=repetitions_by_exercise,
+        feeling=feeling,
+        extra_exercises=extra_exercises,
+        comment=comment,
+        weights_by_exercise=weights_by_exercise,
+        sets_by_exercise=sets_by_exercise,
+    )
+    db.session.commit()
+    return session
+
+
+def get_session(session_id: int | None) -> WorkoutSession | None:
+    """The session with that id, or None for a missing id or an unknown one."""
+    if session_id is None:
+        return None
+    return db.session.get(WorkoutSession, session_id)
+
+
+def _fill_session(
+    session: WorkoutSession,
+    workout_id: int,
+    user_id: int,
+    session_date: date_type,
+    duration_minutes: int,
+    repetitions_by_exercise: dict[int, int],
+    feeling: str,
+    extra_exercises,
+    comment: str,
+    weights_by_exercise: dict[int, int | None] | None,
+    sets_by_exercise: dict[int, int | None] | None,
+) -> None:
+    """Validate a session's fields and put them on `session`, logs and all.
+
+    Everything is checked and every log built before a single attribute is
+    assigned, so a session being corrected is left exactly as it was when the
+    new values don't hold up — the route re-renders the form and nothing has
+    half-changed underneath it.
     """
     workout = db.session.get(Workout, workout_id)
     if not workout:
@@ -243,13 +482,6 @@ def log_session(
         raise ValidationError("Duration must be between 10 and 90 minutes.")
     if feeling not in FEELINGS:
         raise ValidationError("Feeling must be good, okay or bad.")
-    if category not in CATEGORIES:
-        # Built from the labels the dropdown is filled with, so the message and
-        # the options it names cannot drift apart.
-        raise ValidationError(
-            "Sort of sport must be one of "
-            f"{', '.join(CATEGORIES.values())}."
-        )
     if not isinstance(session_date, date_type):
         raise ValidationError("Invalid date.")
     comment = (comment or "").strip()
@@ -317,25 +549,94 @@ def log_session(
             )
         )
 
-    session = WorkoutSession(
-        workout_id=workout_id,
-        user_id=user_id,
-        date=session_date,
-        duration_minutes=duration_minutes,
-        feeling=feeling,
-        category=category,
-        comment=comment or None,
-    )
+    session.workout_id = workout_id
+    session.user_id = user_id
+    session.date = session_date
+    session.duration_minutes = duration_minutes
+    session.feeling = feeling
+    session.category = workout.category  # the sort of sport, as it stands today
+    session.comment = comment or None
+    # Assigning the collection deletes whatever was logged before: the cascade
+    # is delete-orphan, so a corrected session leaves no stray logs behind.
     session.logs = logs
-    db.session.add(session)
-    db.session.commit()
-    return session
 
 
-def date_choices(days_back: int = 30, today: date_type | None = None) -> list[date_type]:
-    """Dates for the date dropdown: today plus the previous `days_back` days."""
+def session_form(session: WorkoutSession) -> dict:
+    """A session as the track form's own fields, for editing it.
+
+    The shape mirrors what the form submits rather than what the database
+    holds: {"id", "workout_id", "user_id", "date", "duration_minutes",
+    "feeling", "comment", "tracking_mode", "repetitions", "weights", "sets",
+    "extras"}, the three maps keyed by exercise id and `extras` a list of
+    {"name", "repetitions", "weight", "sets"}.
+
+    A session with any exercise counted in sets comes back in SETS_MODE, where
+    the repetitions of a dropdown are the repetitions of *one* set — so that is
+    what `repetitions` carries there, and re-saving an untouched form logs
+    exactly what is already stored. An exercise logged as a total inside such a
+    session is read back as one set of its total, which comes to the same
+    thing.
+    """
+    in_sets = any(log.tracked_in_sets for log in session.logs)
+    logs = [log for log in session.logs if not log.is_extra]
+    return {
+        "id": session.id,
+        "workout_id": session.workout_id,
+        "user_id": session.user_id,
+        "date": session.date,
+        "duration_minutes": session.duration_minutes,
+        "feeling": session.feeling,
+        "comment": session.comment or "",
+        "tracking_mode": SETS_MODE if in_sets else TOTAL_MODE,
+        "repetitions": {
+            log.exercise_id: _form_repetitions(log, in_sets) for log in logs
+        },
+        "weights": {log.exercise_id: log.weight for log in logs},
+        "sets": {log.exercise_id: _form_sets(log, in_sets) for log in logs},
+        "extras": [
+            {
+                "name": log.extra_name,
+                "repetitions": _form_repetitions(log, in_sets),
+                "weight": log.weight,
+                "sets": _form_sets(log, in_sets),
+            }
+            for log in session.logs
+            if log.is_extra
+        ],
+    }
+
+
+def _form_repetitions(log: SessionExercise, in_sets: bool) -> int:
+    """What the repetitions dropdown shows for a log: per set, or the total."""
+    if in_sets and log.tracked_in_sets:
+        return log.repetitions_per_set
+    return log.repetitions
+
+
+def _form_sets(log: SessionExercise, in_sets: bool) -> int | None:
+    """What the sets dropdown shows: NO_SETS unless the form counts in sets."""
+    if not in_sets:
+        return NO_SETS
+    return log.sets or 1  # a total, inside a session counted in sets
+
+
+def date_choices(
+    days_back: int = 30,
+    today: date_type | None = None,
+    include: date_type | None = None,
+) -> list[date_type]:
+    """Dates for the date dropdown: today plus the previous `days_back` days.
+
+    `include` adds one date the window would otherwise leave out — the date of
+    a session being edited, which can be older than the dropdown reaches. The
+    list stays newest first, so the extra date lands where it belongs rather
+    than at the end.
+    """
     today = today or date_type.today()
-    return [today - timedelta(days=i) for i in range(days_back + 1)]
+    days = [today - timedelta(days=i) for i in range(days_back + 1)]
+    if include and include not in days:
+        days = sorted([*days, include], reverse=True)
+    return days
 
 
 # ---------------------------------------------------------------- analytics
@@ -481,14 +782,14 @@ def _repetition_trend(dates: dict[date_type, int]) -> dict:
     }
 
 
-def _category_rank(category: str) -> int:
-    """Where a category sits in CATEGORIES, which is what breaks a tie.
+def _category_rank(category: str, order: dict[str, int]) -> int:
+    """Where a category sits in the stored order, which is what breaks a tie.
 
-    A value CATEGORIES no longer knows — only reachable through data logged
-    before it was renamed — sorts last rather than raising.
+    A value the category table no longer holds — only reachable through a
+    session logged before that sort of sport was deleted — sorts last rather
+    than raising.
     """
-    order = list(CATEGORIES)
-    return order.index(category) if category in order else len(order)
+    return order.get(category, len(order))
 
 
 def activity_map(
@@ -501,9 +802,9 @@ def activity_map(
 
     Each day also carries the `category` its cell is coloured by: the sort of
     sport most of that day's sessions were. A day holding two sorts in equal
-    numbers takes whichever comes first in CATEGORIES, so the colour of a day
-    never depends on the order the rows came back in. A day with no session has
-    no category at all.
+    numbers takes whichever comes first in the category table, so the colour of
+    a day never depends on the order the rows came back in. A day with no
+    session has no category at all.
     """
     end = end or date_type.today()
     start = end - timedelta(days=days - 1)
@@ -521,13 +822,14 @@ def activity_map(
         .all()
     )
 
+    order = {value: index for index, value in enumerate(category_map())}
     counts: dict[date_type, int] = {}
     categories: dict[date_type, str] = {}
     ranking: dict[date_type, tuple[int, int]] = {}
     for day, category, count in rows:
         counts[day] = counts.get(day, 0) + count
-        # Most sessions wins; CATEGORIES order settles a tie.
-        rank = (-count, _category_rank(category))
+        # Most sessions wins; the order of the category table settles a tie.
+        rank = (-count, _category_rank(category, order))
         if day not in ranking or rank < ranking[day]:
             ranking[day] = rank
             categories[day] = category
@@ -540,7 +842,7 @@ def day_sessions(day: date_type, user_id: int | None = None) -> list[dict]:
 
     This is what a click on a cell of the activity map opens: the sessions
     behind that one cell, for the user the page is filtered to. Each entry is
-    {"category", "category_label", "workout", "user", "duration_minutes",
+    {"id", "category", "category_label", "workout", "user", "duration_minutes",
     "feeling", "comment", "repetitions", "weight", "exercises": [...]}, and
     each exercise in turn is {"name", "repetitions", "sets",
     "repetitions_per_set", "weight", "weight_moved", "extra"} — the same shape
@@ -566,6 +868,8 @@ def day_sessions(day: date_type, user_id: int | None = None) -> list[dict]:
     )
     return [
         {
+            # what the panel's "correct this session" link points at
+            "id": session.id,
             "category": session.category,
             "category_label": session.category_label,
             "workout": session.workout.name,

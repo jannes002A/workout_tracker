@@ -95,30 +95,41 @@ def test_activity_map_has_no_category_on_a_day_without_a_session(app, seeded):
     assert by_date["2026-09-01"]["category"] == DEFAULT_CATEGORY
 
 
+def sport(name, category, user, days, reps=10):
+    """A workout of that sort of sport, performed by `user` on each of `days`.
+
+    The sort of sport is the workout's, so a day of two sorts takes two
+    workouts.
+    """
+    workout = services.create_workout(name, ["Squat"], category)
+    for day in days:
+        services.log_session(
+            workout.id, user.id, day, 45, {workout.exercises[0].id: reps}, "good"
+        )
+    return workout
+
+
 def test_activity_map_colours_each_day_by_its_sort_of_sport(app, user):
-    workout = services.create_workout("Leg day", ["Squat"])
-    reps = {workout.exercises[0].id: 10}
-    services.log_session(
-        workout.id, user.id, date(2026, 9, 1), 45, reps, "good", category="judo"
-    )
-    services.log_session(
-        workout.id, user.id, date(2026, 9, 2), 45, reps, "good", category="mobility"
-    )
+    sport("Randori", "judo", user, [date(2026, 9, 1)])
+    sport("Stretching", "mobility", user, [date(2026, 9, 2)])
     data = services.activity_map(end=date(2026, 9, 8), days=30)
     by_date = {c["date"]: c for week in data["weeks"] for c in week if c}
     assert by_date["2026-09-01"]["category"] == "judo"
     assert by_date["2026-09-02"]["category"] == "mobility"
 
 
+def test_activity_map_colours_a_day_by_a_sort_of_sport_added_on_the_page(app, user):
+    services.create_category("Running")
+    sport("Intervals", "running", user, [date(2026, 9, 1)])
+    data = services.activity_map(end=date(2026, 9, 8), days=30)
+    by_date = {c["date"]: c for week in data["weeks"] for c in week if c}
+    assert by_date["2026-09-01"]["category"] == "running"
+
+
 def test_activity_map_day_of_several_sorts_takes_the_one_done_most(app, user):
-    workout = services.create_workout("Leg day", ["Squat"])
-    reps = {workout.exercises[0].id: 10}
     day = date(2026, 9, 3)
-    services.log_session(workout.id, user.id, day, 45, reps, "good", category="weights")
-    for _ in range(2):
-        services.log_session(
-            workout.id, user.id, day, 45, reps, "good", category="mobility"
-        )
+    sport("Leg day", "weights", user, [day])
+    sport("Stretching", "mobility", user, [day, day])
     data = services.activity_map(end=date(2026, 9, 8), days=30)
     by_date = {c["date"]: c for week in data["weeks"] for c in week if c}
     assert by_date["2026-09-03"]["count"] == 3  # the shade still counts them all
@@ -127,14 +138,23 @@ def test_activity_map_day_of_several_sorts_takes_the_one_done_most(app, user):
 
 def test_activity_map_breaks_a_tied_day_by_category_order(app, user):
     """Two sorts done once each: the colour must not depend on row order."""
-    workout = services.create_workout("Leg day", ["Squat"])
-    reps = {workout.exercises[0].id: 10}
     day = date(2026, 9, 3)
-    services.log_session(workout.id, user.id, day, 45, reps, "good", category="other")
-    services.log_session(workout.id, user.id, day, 45, reps, "good", category="judo")
+    sport("Something else", "other", user, [day])
+    sport("Randori", "judo", user, [day])
     data = services.activity_map(end=date(2026, 9, 8), days=30)
     by_date = {c["date"]: c for week in data["weeks"] for c in week if c}
-    assert by_date["2026-09-03"]["category"] == "judo"  # earlier in CATEGORIES
+    assert by_date["2026-09-03"]["category"] == "judo"  # earlier in the table
+
+
+def test_activity_map_ties_are_broken_by_the_stored_order(app, user):
+    """A sort of sport added on the page sorts after the seeded four."""
+    services.create_category("Running")
+    day = date(2026, 9, 3)
+    sport("Intervals", "running", user, [day])
+    sport("Something else", "other", user, [day])
+    data = services.activity_map(end=date(2026, 9, 8), days=30)
+    by_date = {c["date"]: c for week in data["weeks"] for c in week if c}
+    assert by_date["2026-09-03"]["category"] == "other"  # ahead of the addition
 
 
 # ---------------------------------------------------------- day_sessions
@@ -159,10 +179,10 @@ def test_day_sessions_is_empty_for_a_day_with_nothing_on_it(app, seeded):
 
 
 def test_day_sessions_carries_the_sort_of_sport(app, user):
-    workout = services.create_workout("Leg day", ["Squat"])
+    workout = services.create_workout("Randori", ["Squat"], "judo")
     services.log_session(
         workout.id, user.id, date(2026, 9, 1), 45, {workout.exercises[0].id: 10},
-        "good", category="judo",
+        "good",
     )
     entry = services.day_sessions(date(2026, 9, 1))[0]
     assert (entry["category"], entry["category_label"]) == ("judo", "Judo")
@@ -929,13 +949,13 @@ def two_users(app, user, other_user):
 
 def test_activity_map_is_coloured_per_user(app, two_users, user, other_user):
     """The colour follows the filter: another person's sort is not shown."""
-    legs = two_users["legs"]
-    reps = {m.id: 10 for m in legs.exercises}
     day = date(2026, 9, 5)
-    services.log_session(legs.id, user.id, day, 45, reps, "good", category="judo")
-    services.log_session(
-        legs.id, other_user.id, day, 45, reps, "good", category="mobility"
-    )
+    judo = services.create_workout("Randori", ["Uchi-komi"], "judo")
+    mobility = services.create_workout("Stretching", ["Hip opener"], "mobility")
+    for workout, person in ((judo, user), (mobility, other_user)):
+        services.log_session(
+            workout.id, person.id, day, 45, {workout.exercises[0].id: 10}, "good"
+        )
     for person, expected in ((user, "judo"), (other_user, "mobility")):
         data = services.activity_map(end=date(2026, 9, 8), days=30, user_id=person.id)
         by_date = {c["date"]: c for week in data["weeks"] for c in week if c}

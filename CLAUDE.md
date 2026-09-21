@@ -37,11 +37,18 @@ is the one that did *not* need it: a NOT NULL column with a constant default is
 the one shape SQLite will add in place, so an older database takes
 `ALTER TABLE workout_session ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT
 'weights'` and keeps its sessions, which is what `instance/workouts.db` was
-given — `instance/workouts.db.bak-before-category` is the copy from before.)
+given — `instance/workouts.db.bak-before-category` is the copy from before.
+`Workout.category` is the same shape and was added the same way:
+`ALTER TABLE workout ADD COLUMN category VARCHAR(40) NOT NULL DEFAULT
+'weights'`, followed by an `UPDATE` giving each workout the sort of sport its
+sessions had already been logged as, so the create page agrees with the
+activity map — `instance/workouts.db.bak-before-workout-category` is the copy
+from before. The `category` table itself needed nothing: `db.create_all()`
+creates a table that isn't there, and `services.ensure_categories()` seeds it.)
 
 ## Architecture
 
-Application factory pattern: `create_app(test_config)` in `src/__init__.py` builds the app, initialises `db`, calls `db.create_all()`, and registers the single blueprint `main` from `src/routes.py`. Tests pass `test_config` to swap in an in-memory SQLite database.
+Application factory pattern: `create_app(test_config)` in `src/__init__.py` builds the app, initialises `db`, calls `db.create_all()` and `services.ensure_categories()` (which seeds the sorts of sport), and registers the single blueprint `main` from `src/routes.py`. Tests pass `test_config` to swap in an in-memory SQLite database.
 
 The key structural rule is the **routes/services split**:
 
@@ -50,14 +57,30 @@ The key structural rule is the **routes/services split**:
 
 ### Data model
 
-`src/models.py`: `User` → `WorkoutSession`, `Workout` → `Exercise` (what the template is made of) and `Workout` → `WorkoutSession` (performed instances). Repetitions are **per exercise, not per session**: `SessionExercise` carries a repetition count *and an extra weight* for one exercise within one session, and `WorkoutSession.total_repetitions` sums the first. Every relationship cascades `all, delete-orphan`, so deleting a workout clears its exercises, sessions and logs.
+`src/models.py`: `User` → `WorkoutSession`, `Workout` → `Exercise` (what the template is made of) and `Workout` → `WorkoutSession` (performed instances), plus `Category`, the sorts of sport a workout can be. Repetitions are **per exercise, not per session**: `SessionExercise` carries a repetition count *and an extra weight* for one exercise within one session, and `WorkoutSession.total_repetitions` sums the first. Every relationship cascades `all, delete-orphan`, so deleting a workout clears its exercises, sessions and logs.
 
-`WorkoutSession.category` is the **sort of sport** the session was — one of
-`CATEGORIES` — which is why the track page asks for it at the very top of the
-form: it describes the whole session rather than any one exercise, the way the
-feeling and the duration do. `category_label` reads back the label `CATEGORIES`
-gives it. It is what the activity map colours a day by, and nothing else on the
-analytics page reads it.
+The **sort of sport** is a `Category` row — `value` (what is stored), `label`
+(what is shown), `color` (what the activity map shades a day of it towards) and
+`position` (the order of every dropdown and of the map's legend, and the
+tie-break for a day that held two sorts). It lives in the database rather than
+in a constant because the create page can add one; `DEFAULT_CATEGORIES` in
+`models.py` is only what an empty table is seeded with —
+weights/Weights/blue, judo/Judo/red, mobility/Mobility/violet,
+other/Others/black, in that order — and `DEFAULT_CATEGORY` = `"weights"` is
+what the create form's dropdown opens on. `services.ensure_categories()`, which
+`create_app` calls right after `db.create_all()`, is what puts them there: it
+adds only the defaults that are missing, so it is safe at every startup and
+never touches a sort of sport added on the page. `category_by_value` and
+`label_for_category` in `models.py` are the lookups; the latter falls back to
+the bare value, which is all a category deleted after the fact leaves behind.
+
+**`Workout.category` is where the sort of sport is chosen; `WorkoutSession.category`
+is a copy of it.** The workout is the template, so it is what /create asks
+about; `log_session` copies the value onto the session rather than reading it
+back through the workout, so re-labelling a workout tomorrow cannot recolour
+the days it was already performed on. `category_label` on either reads the
+label back. The session's copy is what the activity map colours a day by, and
+nothing else on the analytics page reads it.
 
 `SessionExercise.weight` is the extra load carried for those repetitions, and is
 **NULL when there was none** — a bodyweight exercise, which is what the track page
@@ -89,7 +112,7 @@ A `SessionExercise` is one of two things, which `is_extra` distinguishes and the
 - `exercise_id` set — an exercise of the workout template.
 - `exercise_id` NULL and `extra_name` set — an **extra exercise**, done in that session only. It is logged and analysed like any other exercise but deliberately creates no `Exercise` row, so it never joins the workout and is not asked for again next session.
 
-Allowed enum-like values live next to what they constrain: `FEELINGS` and `FEELING_SCORES` (bad=1, okay=2, good=3, used to plot the trend) plus `CATEGORIES` (value → dropdown label: Weights, Judo, Mobility, Others) with `DEFAULT_CATEGORY` = `"weights"` in `models.py`, the order of `CATEGORIES` doubling as the order of the activity map's legend and as the tie-break for a day holding two sorts of sport; `DURATION_CHOICES` (10–90 in steps of 5), `REPETITION_CHOICES` (0–120, where 0 records an exercise that was part of the session but not done), `WEIGHT_CHOICES` (1–200) with `NO_WEIGHT` (`None`, the "no extra weight" choice), `DEFAULT_WEIGHT` = `NO_WEIGHT` and `WEIGHT_UNIT` ("kg", only ever displayed — nothing converts between units), `SET_CHOICES` (1–20) with `NO_SETS` (`None`, "these repetitions are already the total") and `DEFAULT_SETS` = `NO_SETS`, `TRACKING_MODES` (value → dropdown label, `TOTAL_MODE` and `SETS_MODE`) with `DEFAULT_TRACKING_MODE` = `TOTAL_MODE`, `MIN_AGE`/`MAX_AGE` (1–120) and `MAX_COMMENT_LENGTH` (2000, the textarea's `maxlength` as well as the check) in `services.py`. Routes pass these same lists to the templates to populate the dropdowns, so the form options and the server-side validation can never drift apart; the out-of-range message is built from the ends of `REPETITION_CHOICES` for the same reason.
+Allowed enum-like values live next to what they constrain: `FEELINGS` and `FEELING_SCORES` (bad=1, okay=2, good=3, used to plot the trend) plus, for the sorts of sport, `DEFAULT_CATEGORIES`, `DEFAULT_CATEGORY`, `CATEGORY_PALETTE` (the colours handed to the ones added on the create page) and `UNKNOWN_CATEGORY_COLOR` in `models.py` — the *values* themselves being rows, not a constant, which is why routes pass `services.category_map()` (value → row, in order) to the templates instead of a dict of labels; `MAX_CATEGORY_LABEL` (40) caps a new one's name and the input's `maxlength`; `DURATION_CHOICES` (10–90 in steps of 5), `REPETITION_CHOICES` (0–120, where 0 records an exercise that was part of the session but not done), `WEIGHT_CHOICES` (1–200) with `NO_WEIGHT` (`None`, the "no extra weight" choice), `DEFAULT_WEIGHT` = `NO_WEIGHT` and `WEIGHT_UNIT` ("kg", only ever displayed — nothing converts between units), `SET_CHOICES` (1–20) with `NO_SETS` (`None`, "these repetitions are already the total") and `DEFAULT_SETS` = `NO_SETS`, `TRACKING_MODES` (value → dropdown label, `TOTAL_MODE` and `SETS_MODE`) with `DEFAULT_TRACKING_MODE` = `TOTAL_MODE`, `MIN_AGE`/`MAX_AGE` (1–120) and `MAX_COMMENT_LENGTH` (2000, the textarea's `maxlength` as well as the check) in `services.py`. Routes pass these same lists to the templates to populate the dropdowns, so the form options and the server-side validation can never drift apart; the out-of-range message is built from the ends of `REPETITION_CHOICES` for the same reason.
 
 ### Users page
 
@@ -103,6 +126,31 @@ hand-crafted POST gets the range message rather than an `int()` traceback.
 
 ### Create page
 
+`/create` opens with the workout's name and then its **sort of sport** — a
+`category` dropdown filled from `category_map()`, so it offers exactly the rows
+the table holds. Its field name is `CATEGORY_FIELD` in `routes.py`, and the
+route reads it with `DEFAULT_CATEGORY` as the fallback, so a hand-crafted POST
+leaving the field out still saves a workout while a value the dropdown cannot
+have produced is rejected by `create_workout` with a message built from the
+labels the dropdown is filled with. The success flash names it, and the
+workout list under the form shows each workout's sort of sport with its colour.
+
+Under the panel sits a second, separate form — a form cannot be nested in
+another — posting a `label` (`CATEGORY_LABEL_FIELD`) to `/categories`, which is
+`add_category` in `routes.py`: it adds a sort of sport and redirects straight
+back to `/create`, where the dropdown above now offers it. `create_category`
+derives the stored `value` from the label (lowercased, punctuation to hyphens)
+and rejects a label, or a value, that a category already has — so
+"Trail running" and "trail-running" cannot become two sorts that colour the
+same. **The colour is assigned, not asked for**: the first entry of
+`CATEGORY_PALETTE` no category is wearing yet, so the seeded four keep theirs
+and every addition is told apart on the map without a colour picker on the
+form; once the palette is used up it starts over rather than leaving a category
+colourless. A new sort of sport goes last, which is where it then sits in every
+dropdown, in the legend and in the map's tie-break. There is no delete: nothing
+in the app removes a category, and `label_for_category` covers one removed by
+hand.
+
 Besides the free-text exercise fields, `/create` lists every exercise name already in the
 log as a chip, from `known_exercise_names()` — the exercises of existing workouts *and*
 extras logged on the track page, deduplicated and sorted case-insensitively. A chip carries
@@ -113,24 +161,20 @@ markup. The chips need JS, so `create_workout` also drops duplicate names
 case-insensitively server-side.
 
 **Workouts are shared; sessions belong to a user.** A `Workout` is a template anyone can
-perform, so `/create` is not per-user and `known_exercise_names()` spans everybody. What is
+perform — and the sort of sport is the template's, not the session's — so
+`/create` is not per-user and `known_exercise_names()` spans everybody. What is
 per-user is the `WorkoutSession`: `user_id` is `nullable=False`, so every session is logged
 against a person, and deleting a user cascades away their sessions and logs while leaving
 the workout templates alone.
 
 ### Track page
 
-`/track` opens with the **sort of sport** — a `category` dropdown offering
-`CATEGORIES`, first on the form because it describes the whole session. Its field
-name is `CATEGORY_FIELD` in `routes.py`, and the route reads it with
-`DEFAULT_CATEGORY` as the fallback, so a hand-crafted POST leaving the field out
-still logs a session (the way a missing weight does) while a value the dropdown
-cannot have produced is rejected by `log_session` with a message built from the
-labels `CATEGORIES` fills the dropdown with. The success flash names it. Unlike
-the tracking mode this is stored data, not a way of reading the form, which is
-why an unknown value raises rather than quietly falling back.
+`/track` does **not** ask for the sort of sport: it is the workout's, picked on
+the create page, so each option of the workout dropdown names it
+("Randori · Judo") and `log_session` copies it onto the session. The success
+flash names it all the same.
 
-Below it sits a `user_id` dropdown naming who trained — sessions cannot exist without
+`/track` opens with a `user_id` dropdown naming who trained — sessions cannot exist without
 one, so the page renders "You need a user first" (and no form at all) until a user exists,
 the same way it already did for workouts. `USER_FIELD` in `routes.py` is the single source
 of that field name, shared with the analytics filter.
@@ -180,7 +224,39 @@ Last on the form is an optional free-text `comment` about the session. `log_sess
 strips it and stores a blank one as **NULL, not `""`**, which is what lets
 `session_comments` select the sessions that actually have something to say.
 
-`_repetitions_from_form`, `_weights_from_form`, `_sets_from_form` (all three over the shared `_by_exercise_id`) and `_extra_exercises_from_form` in `routes.py` do the field parsing; `REPS_FIELD_PREFIX`, `WEIGHT_FIELD_PREFIX`, `SETS_FIELD_PREFIX`, `EXTRA_NAME_FIELD`, `EXTRA_REPS_FIELD`, `EXTRA_WEIGHT_FIELD`, `EXTRA_SETS_FIELD`, `MODE_FIELD`, `CATEGORY_FIELD`, `USER_FIELD`, `DAY_FIELD` (the analytics query string's open day) and `COMMENT_FIELD` are the single source of the field-name conventions.
+#### Correcting a session
+
+`/track/<session_id>` is the same route, the same template and the same form,
+opened on a session that already exists — the "Correct this session" link under
+every session in the analytics day panel. `track(session_id)` looks the session
+up with `get_session`, hands the template `editing=session_form(session)` (None
+when tracking a new one, which is what every field branches on to pre-select
+itself) and saves through `update_session` instead of `log_session`. The
+headline, the lede and the submit button change with it, and a Cancel link goes
+back to the day. A session id nothing answers to flashes and redirects to
+`/analytics`, the way an unknown day there renders without its panel.
+
+`session_form` returns the form's **own** fields rather than the stored ones,
+which is the whole trick: in sets mode the repetitions of a dropdown are the
+repetitions of one set, so that is what comes back, and re-saving an untouched
+form logs exactly what is already there (a test asserts that round trip). A
+session with any exercise counted in sets opens in sets mode, an exercise
+logged as a total inside it reading back as one set of that total. Extras come
+back as filled-in rows with one empty row after them; clearing a name drops
+that row, since blank rows are dropped as always.
+
+`update_session` takes exactly `log_session`'s arguments — `_fill_session` is
+the half they share, validating everything and building every log *before*
+assigning anything, so a rejected correction leaves the session exactly as it
+was. The logs are **replaced wholesale** rather than patched (the cascade
+deletes the old ones), which is what lets the workout itself be corrected: the
+new logs belong to the exercises of the workout now chosen, and the sort of
+sport is copied from it again. Saving redirects to the analytics page open on
+the day the session now falls on. `date_choices(include=...)` is what keeps the
+date dropdown honest for a session older than its 31-day window — without it
+saving would silently move the session to a date the dropdown does offer.
+
+`_repetitions_from_form`, `_weights_from_form`, `_sets_from_form` (all three over the shared `_by_exercise_id`) and `_extra_exercises_from_form` in `routes.py` do the field parsing; `REPS_FIELD_PREFIX`, `WEIGHT_FIELD_PREFIX`, `SETS_FIELD_PREFIX`, `EXTRA_NAME_FIELD`, `EXTRA_REPS_FIELD`, `EXTRA_WEIGHT_FIELD`, `EXTRA_SETS_FIELD`, `MODE_FIELD`, `CATEGORY_FIELD` and `CATEGORY_LABEL_FIELD` (both on the create page), `USER_FIELD`, `DAY_FIELD` (the analytics query string's open day) and `COMMENT_FIELD` are the single source of the field-name conventions.
 
 ### Analytics page
 
@@ -215,12 +291,13 @@ Five sections, in this order (a test asserts the order):
 1. `activity_map()` — heatmap of the last 365 days, one cell per day counting
    sessions. A cell carries **two** things: its `level` shades it by how many
    sessions the day held, and its `category` hues it by which sort of sport
-   they were. A day of several sorts takes the one done most, `CATEGORIES`
-   order breaking a tie so the colour never depends on the order rows came
-   back in; a day with no session has `category` `None`. The `category_legend`
-   macro in `analytics.html` draws the key beneath the grid — one full-shade
-   cell per entry of `CATEGORIES`, so the legend cannot list a colour the map
-   doesn't use.
+   they were. A day of several sorts takes the one done most, the stored
+   category order breaking a tie so the colour never depends on the order rows
+   came back in; a day with no session has `category` `None`. The
+   `category_legend` macro in `analytics.html` draws the key beneath the grid —
+   one full-shade cell per row of `category_map()`, so the legend cannot list a
+   colour the map doesn't use, and a sort of sport added on the create page
+   appears in both without a line of CSS.
 
    Every day that holds a session is a **link to its own details**, rendered by
    the `day_detail` macro directly under the map (so the page still has five
@@ -229,7 +306,9 @@ Five sections, in this order (a test asserts the order):
    is also why the grid needs no JS for any of this. `day_sessions(day,
    user_id)` is what it lists — every session logged that day, oldest-logged
    first, each with its sort of sport, workout, who trained, duration, feeling,
-   comment and one row per exercise: the name (tagged when it was an extra),
+   comment, a link to correct it (`/track/<id>`, which is why every entry
+   carries the session's `id`) and one row per exercise: the name (tagged when
+   it was an extra),
    the repetitions — written `4 × 12 = 48` when the session was counted in
    sets, since `sets` and `repetitions_per_set` survive to say so — and the
    extra weight, or "bodyweight" where the column is NULL. The figures are read
@@ -288,21 +367,24 @@ Five sections, in this order (a test asserts the order):
 
 Both heatmaps come from **`_calendar_weeks(counts, end, days, categories=None)`**, which buckets a `{date: count}` mapping into Monday-first weeks of `{"date", "count", "level", "category"}` cells (`None` pads the first partial week), plus the window's `max` and `months` — one `{"label": "Sep 2025", "weeks": n}` per run of week columns, which the template lays out as the x axis above the grid. A week is attributed to the month of its first day, and the spans always sum to the number of columns.
 
-Month-label alignment is CSS, not magic numbers: `--cell` and `--cell-gap` define the grid, and each label's width is `calc(var(--weeks) * (var(--cell) + var(--cell-gap)) - var(--cell-gap))` with `--weeks` set inline. Change the cell size and the axis follows. Labels are deliberately not clipped — a full month is wide enough for "May 2026" at the current font size, and only the trailing partial month is narrow, with nothing after it to overlap. Levels are 0-4 relative to that grid's own busiest day, so an exercise's shading is relative to its own best day, not to other exercises. `categories` is the optional `{date: category}` mapping that colours the activity map; a grid built without it — every per-exercise one, where a cell counts repetitions and no one sort of sport owns it — gets `category` `None` on every cell and keeps the default green scale. Counts outside the window are ignored, so an all-time total can be non-zero while its grid is empty. The `heatmap` Jinja macro in `analytics.html` renders any of these grids, with the `unit` argument naming what a cell counts ("session" or "repetition"); a cell that carries a category also gets a `cat-<value>` class and has its label in the tooltip. Its `linked` argument — true for the activity map alone — turns the non-empty days into `<a>` cells pointing at `?day=`, and the open day's cell carries a `selected` class; an exercise grid's days are never links, since a cell there is repetitions, not sessions to open.
+Month-label alignment is CSS, not magic numbers: `--cell` and `--cell-gap` define the grid, and each label's width is `calc(var(--weeks) * (var(--cell) + var(--cell-gap)) - var(--cell-gap))` with `--weeks` set inline. Change the cell size and the axis follows. Labels are deliberately not clipped — a full month is wide enough for "May 2026" at the current font size, and only the trailing partial month is narrow, with nothing after it to overlap. Levels are 0-4 relative to that grid's own busiest day, so an exercise's shading is relative to its own best day, not to other exercises. `categories` is the optional `{date: category value}` mapping that colours the activity map; a grid built without it — every per-exercise one, where a cell counts repetitions and no one sort of sport owns it — gets `category` `None` on every cell and keeps the default green scale. Counts outside the window are ignored, so an all-time total can be non-zero while its grid is empty. The `heatmap` Jinja macro in `analytics.html` renders any of these grids, with the `unit` argument naming what a cell counts ("session" or "repetition"); a cell that carries a category looks it up in `categories` (the `category_map()` the route passed in), carries that row's colour as an inline `--heat` and has its label in the tooltip. Its `linked` argument — true for the activity map alone — turns the non-empty days into `<a>` cells pointing at `?day=`, and the open day's cell carries a `selected` class; an exercise grid's days are never links, since a cell there is repetitions, not sessions to open.
 
 The shading itself is one CSS scale rather than five: `--heat` is the colour a
 grid is shaded towards, `--heat-0` the empty-day grey, and levels 1-3 are
-`color-mix`es between the two, so `.cat-<value>` only has to redefine `--heat`
-(from the `--cat-*` colours, one per entry of `CATEGORIES`) and the whole ramp
-follows. Adding a category therefore means a `--cat-*` colour and a `.cat-*`
-rule in `style.css` alongside the `CATEGORIES` entry — nothing else.
+`color-mix`es between the two, so a cell only has to redefine `--heat` and the
+whole ramp follows. A cell of the activity map does that **inline**, from the
+colour stored on its category, which is what lets a sort of sport added on the
+create page be coloured without a rule in `style.css` — there are no `.cat-*`
+rules and no `--cat-*` variables any more. Change a category's colour in the
+table and the map, the legend and the create page's swatches all follow.
 
 `activity_map`, `feeling_trend` and the exercise grids render straight into the template's markup and SVG geometry, computed in Jinja, so changing a returned shape means changing `analytics.html` too. Analytics service functions take an explicit `end` date defaulting to today, which is what lets the tests seed fixed dates.
 
 ## Tests
 
 `tests/conftest.py` provides `app` (in-memory DB, pushed app context, dropped after each
-test), `client`, and the `user` / `other_user` fixtures ("Alex", 34 and "Sam", 41). Since
+test — and seeded with the four default sorts of sport, since `create_app` seeds them),
+`client`, and the `user` / `other_user` fixtures ("Alex", 34 and "Sam", 41). Since
 `log_session` requires a user, almost every test takes `user`; `test_analytics.py`'s
 `two_users` fixture splits one shared workout across both people so the per-user analytics
 can be checked against a clean split. `test_services.py` and `test_analytics.py` call service functions directly; `test_routes.py` exercises the HTTP layer via `client` and builds POST bodies with its `track_form` helper. Every service function is expected to have test coverage.

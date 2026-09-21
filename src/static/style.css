@@ -10,13 +10,9 @@
   --cell-gap: 3px;
   --heat-0: #dde3ea;     /* a day with nothing on it */
   --heat: #1f6b44;       /* the busiest day; levels 1-3 are mixed towards it */
-  /* One hue per sort of sport, in the order CATEGORIES lists them. The
-     activity map colours a day by the sort it mostly held, and the legend
-     under it is drawn from these same colours. */
-  --cat-weights: #1f6b44;
-  --cat-judo: #2f66b5;
-  --cat-mobility: #7a4fb8;
-  --cat-other: #c2761c;
+  /* The hues of the sorts of sport are not here: they are stored with the
+     category rows, since the create page can add one, and a cell that has a
+     sort of sport redefines --heat inline from the colour it was given. */
   --feel-good: #1f7a4d;
   --feel-okay: #c9821f;
   --feel-bad: #b3372c;
@@ -157,6 +153,14 @@ button.ghost:hover { border-style: solid; }
   flex-wrap: wrap;
 }
 .workout-list span { color: var(--ink-soft); }
+/* The sort of sport a workout is, with its colour off the activity map. */
+.workout-sport { display: inline-flex; align-items: center; gap: 0.35rem; }
+
+/* Adding a sort of sport: one field and a button, side by side. */
+.add-category .hint { color: var(--ink-soft); font-size: 0.85rem; margin: 0 0 0.35rem; max-width: 55ch; }
+.add-category-row { display: flex; gap: 0.5rem; align-items: flex-start; }
+.add-category-row button { margin-top: 0; }
+.add-category .legend { margin-bottom: 0; }
 
 .empty { color: var(--ink-soft); }
 
@@ -246,13 +250,10 @@ button.ghost:hover { border-style: solid; }
 .level-3 { background: color-mix(in srgb, var(--heat) 76%, var(--heat-0)); }
 .level-4 { background: var(--heat); }
 
-/* A cell of the activity map carries the sort of sport its day was, which
-   picks the colour the shading is mixed from. Cells without one — every
-   per-exercise grid — keep the default green. */
-.cat-weights { --heat: var(--cat-weights); }
-.cat-judo { --heat: var(--cat-judo); }
-.cat-mobility { --heat: var(--cat-mobility); }
-.cat-other { --heat: var(--cat-other); }
+/* A cell of the activity map carries the sort of sport its day was, and with
+   it that sort's colour as an inline --heat, which the scale above is mixed
+   from. Cells without one — every per-exercise grid — keep the default green.
+   Adding a sort of sport therefore needs no rule here at all. */
 
 /* The map's key: a full-shade cell per sort of sport, spaced like the feeling
    legend's swatches so a label never runs into the next colour. */
@@ -304,6 +305,12 @@ a.cell:hover, a.cell:focus-visible { outline: 2px solid var(--ink); outline-offs
   vertical-align: middle;
 }
 .day-close { font-size: 0.85rem; }
+/* The way back into the track form for a session that needs correcting. */
+.day-session-edit { margin: 0.5rem 0 0; font-size: 0.85rem; }
+
+/* Saving a correction, next to the way out of it. */
+.form-actions { display: flex; align-items: center; gap: 1rem; }
+.form-actions .cancel { font-size: 0.9rem; color: var(--ink-soft); }
 
 .freq-table { border-collapse: collapse; width: 100%; max-width: 480px; background: #fff; }
 .freq-table.wide { max-width: 100%; }

@@ -9,17 +9,75 @@ FEELINGS = ("good", "okay", "bad")
 # Numeric score per feeling, used to plot the feeling trend. Higher is better.
 FEELING_SCORES = {"bad": 1, "okay": 2, "good": 3}
 
-# What sort of sport a session was, picked from the dropdown at the very top of
-# the track form: value -> the label shown for it. The activity map colours a
-# day by its category, so this order is also the order of the map's legend and
-# the tie-break for a day holding several sorts of sport.
-CATEGORIES = {
-    "weights": "Weights",
-    "judo": "Judo",
-    "mobility": "Mobility",
-    "other": "Others",
-}
-DEFAULT_CATEGORY = "weights"  # what the dropdown opens on
+# The sorts of sport there are. Unlike the feelings these live in the database,
+# in the `Category` table, because the create page can add one; the tuple below
+# is only what an empty database is seeded with, in this order, by
+# `services.ensure_categories()`. Each entry is (value, label, colour): the
+# value is what a workout and a session store, the label is what the dropdowns
+# and the legend show, and the colour is what the activity map shades a day of
+# that sport towards.
+DEFAULT_CATEGORIES = (
+    ("weights", "Weights", "#2f66b5"),  # blue
+    ("judo", "Judo", "#c0392b"),  # red
+    ("mobility", "Mobility", "#7a4fb8"),  # violet
+    ("other", "Others", "#1c1f26"),  # black
+)
+DEFAULT_CATEGORY = "weights"  # what the create form's dropdown opens on
+
+# Colours handed to the sorts of sport added on the create page, in this order:
+# `services.create_category` takes the first one no category is using yet, so
+# the four seeded colours above are never handed out again and a new sort is
+# told apart from them on the map. They run out after this many additions, at
+# which point the palette is reused from the start.
+CATEGORY_PALETTE = (
+    "#1f6b44",  # green
+    "#c2761c",  # amber
+    "#0f8fa8",  # teal
+    "#a8326e",  # magenta
+    "#5b6b1f",  # olive
+    "#7b4a21",  # brown
+    "#3b4bb5",  # indigo
+    "#8a6a1f",  # ochre
+)
+# What a value no category row explains is drawn in — only reachable through a
+# session logged under a sort of sport that was later deleted from the table.
+UNKNOWN_CATEGORY_COLOR = "#8a94a6"
+
+
+class Category(db.Model):
+    """A sort of sport, e.g. 'Judo' — what a workout is, and a session with it.
+
+    `value` is the stable, url-safe form stored on `Workout.category` and
+    `WorkoutSession.category`; `label` is what is shown. `position` is the
+    order the dropdowns and the activity map's legend list them in, and the
+    tie-break for a day that held two sorts of sport in equal numbers.
+    `color` is what the map shades such a day towards.
+    """
+
+    id = db.Column(db.Integer, primary_key=True)
+    value = db.Column(db.String(40), unique=True, nullable=False)
+    label = db.Column(db.String(60), unique=True, nullable=False)
+    color = db.Column(db.String(20), nullable=False)
+    position = db.Column(db.Integer, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<Category {self.value}>"
+
+
+def category_by_value(value: str) -> "Category | None":
+    """The category with that value, or None for one the table doesn't know."""
+    return Category.query.filter_by(value=value).first()
+
+
+def label_for_category(value: str) -> str:
+    """The label of that sort of sport, falling back to the bare value.
+
+    A workout or session can only be stored with a value that existed when it
+    was saved, so the fallback is what a category deleted afterwards leaves
+    behind — the raw value rather than a blank.
+    """
+    category = category_by_value(value)
+    return category.label if category else value
 
 
 class User(db.Model):
@@ -37,10 +95,18 @@ class User(db.Model):
 
 
 class Workout(db.Model):
-    """A workout template, e.g. 'Leg day', made up of exercises."""
+    """A workout template, e.g. 'Leg day', made up of exercises.
+
+    `category` is the sort of sport performing it is — the value of one of the
+    `Category` rows, picked on the create page. Every session of the workout is
+    logged under it, which is what the activity map colours a day by.
+    """
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), unique=True, nullable=False)
+    category = db.Column(  # the value of one of the Category rows
+        db.String(40), nullable=False, default=DEFAULT_CATEGORY
+    )
     exercises = db.relationship(
         "Exercise", backref="workout", cascade="all, delete-orphan", lazy=True
     )
@@ -48,8 +114,13 @@ class Workout(db.Model):
         "WorkoutSession", backref="workout", cascade="all, delete-orphan", lazy=True
     )
 
+    @property
+    def category_label(self) -> str:
+        """The label of the sort of sport this workout is."""
+        return label_for_category(self.category)
+
     def __repr__(self) -> str:
-        return f"<Workout {self.name}>"
+        return f"<Workout {self.name} category={self.category}>"
 
 
 class Exercise(db.Model):
@@ -69,9 +140,11 @@ class Exercise(db.Model):
 class WorkoutSession(db.Model):
     """One performed instance of a workout, by one user (tracked on /track).
 
-    `category` is the sort of sport it was — one of CATEGORIES, asked for at the
-    very top of the track form because it describes the whole session rather
-    than any one exercise. The activity map colours each day by it.
+    `category` is the sort of sport it was, copied from the workout when the
+    session is logged. It is stored on the session rather than read back
+    through the workout so that history survives: a workout re-labelled as a
+    different sport tomorrow leaves everything already logged under it
+    untouched. The activity map colours each day by it.
     """
 
     id = db.Column(db.Integer, primary_key=True)
@@ -80,8 +153,8 @@ class WorkoutSession(db.Model):
     date = db.Column(db.Date, nullable=False, default=date_type.today)
     duration_minutes = db.Column(db.Integer, nullable=False)  # 10-90
     feeling = db.Column(db.String(10), nullable=False)  # good / okay / bad
-    category = db.Column(  # which of CATEGORIES the session was
-        db.String(20), nullable=False, default=DEFAULT_CATEGORY
+    category = db.Column(  # the workout's sort of sport, as at logging time
+        db.String(40), nullable=False, default=DEFAULT_CATEGORY
     )
     comment = db.Column(db.Text)  # free text, NULL when the field was left blank
     logs = db.relationship(
@@ -104,8 +177,8 @@ class WorkoutSession(db.Model):
 
     @property
     def category_label(self) -> str:
-        """The label CATEGORIES gives this session's sort of sport."""
-        return CATEGORIES.get(self.category, self.category)
+        """The label of the sort of sport this session was."""
+        return label_for_category(self.category)
 
     def __repr__(self) -> str:
         return (
