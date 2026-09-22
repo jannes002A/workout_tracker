@@ -197,6 +197,20 @@ dropdown offers that number. A small script hides and `disabled`s the sets colum
 for a total (the `hide-sets` class in `style.css` closes the row's grid back up
 over it) and relabels the reps column "reps / set" in sets mode.
 
+In sets mode a second script **fills the rows under the first exercise in from
+it**: changing the first exercise's sets or repetitions copies that figure onto
+every exercise below it in the same workout, since a session counted in sets is
+usually one scheme the whole way down. It only ever fills a dropdown nobody has
+picked — changing an exercise's own sets or repetitions sets `data-picked` on
+it and the first row leaves it alone from then on — and a session opened for
+correction starts with every dropdown of its own workout marked that way, since
+those already carry what was logged. The weight is not copied (it belongs to
+the exercise, not the session), extra rows neither lead nor follow, and nothing
+of this happens when counting a total. It is convenience only: without JS every
+row is submitted with whatever it shows, exactly as before, and no service or
+route knows about it. The `reps-cell` class on the repetitions dropdown is what
+the copy finds it by, the way `sets-cell` already worked.
+
 Below that, `/track` renders a `reps-<exercise id>` and a `weight-<exercise id>` dropdown for the exercises of **every** workout, in one form. A small inline script hides and `disabled`s the fieldsets of the workouts that aren't selected, so only the relevant fields are submitted. Without JS all fields are submitted, so `log_session` deliberately ignores exercise ids that don't belong to the chosen workout while requiring one entry for every exercise that does.
 
 The weight column opens on a **"none" option ahead of `WEIGHT_CHOICES`**, whose

@@ -15,9 +15,10 @@
 {% endmacro %}
 
 {# The repetitions dropdown. In sets mode the number means the repetitions of
-   one set, which is what a session opened for correction is read back as. #}
+   one set, which is what a session opened for correction is read back as. The
+   class is what the script below copies down a workout's rows by. #}
 {% macro reps_select(name, label, id=none, selected=none) %}
-  <select {% if id %}id="{{ id }}" {% endif %}name="{{ name }}" aria-label="{{ label }}">
+  <select {% if id %}id="{{ id }}" {% endif %}class="reps-cell" name="{{ name }}" aria-label="{{ label }}">
     {% for r in repetitions %}
       <option value="{{ r }}" {% if r == (selected if selected is not none else 10) %}selected{% endif %}>{{ r }}</option>
     {% endfor %}
@@ -92,7 +93,9 @@
     {% endfor %}
   </select>
   <p class="hint">Counted in sets, each exercise gets a number of sets and the
-  repetitions of one of them; the two multiply into the repetitions logged.</p>
+  repetitions of one of them; the two multiply into the repetitions logged. The
+  first exercise's sets and repetitions fill in the exercises under it, until
+  you change one of them yourself.</p>
 
   <div class="field-row">
     <div>
@@ -231,6 +234,56 @@ function syncTrackingMode() {
   }
   select.addEventListener('change', sync);
   sync();
+})();
+
+// Counted in sets a session is usually one scheme the whole way down — four
+// sets of ten of everything — so the first exercise of a workout fills in the
+// rows under it. It only ever fills a figure nobody has picked: changing an
+// exercise's own sets or repetitions marks that dropdown as set, and the first
+// row then leaves it alone however often it changes afterwards. The weight is
+// not copied — it is the one figure that belongs to the exercise rather than
+// to the session. Without JS nothing is copied and every row is submitted with
+// whatever it shows, which is what it always was.
+(function () {
+  const form = document.getElementById('track-form');
+  const mode = document.getElementById('{{ mode_field }}');
+
+  // the heading row shares the class, so it is not an exercise
+  function exerciseRows(group) {
+    return Array.from(group.querySelectorAll('.exercise-row'))
+                .filter(row => !row.classList.contains('column-heads'));
+  }
+
+  form.addEventListener('change', function (event) {
+    const select = event.target;
+    if (select.tagName !== 'SELECT') return;
+    const field = select.classList.contains('sets-cell') ? 'sets-cell'
+                : select.classList.contains('reps-cell') ? 'reps-cell' : null;
+    if (!field) return;
+    const row = select.closest('.exercise-row');
+    const group = row && row.closest('.exercise-reps');
+    if (!group) return;  // an extra row: it neither leads nor follows
+    const rows = exerciseRows(group);
+    if (row !== rows[0]) {
+      select.dataset.picked = 'yes';
+      return;
+    }
+    if (mode.value !== '{{ sets_mode }}') return;
+    for (const other of rows.slice(1)) {
+      const target = other.querySelector('select.' + field);
+      if (target && !target.dataset.picked) target.value = select.value;
+    }
+  });
+
+  {% if editing %}
+  // A session being corrected already carries what was logged in every field
+  // of its own workout, so there is nothing there to fill in: those dropdowns
+  // count as picked from the start.
+  for (const select of document.querySelectorAll(
+         '.exercise-reps[data-workout="{{ editing.workout_id }}"] select')) {
+    select.dataset.picked = 'yes';
+  }
+  {% endif %}
 })();
 
 document.getElementById('{{ mode_field }}')

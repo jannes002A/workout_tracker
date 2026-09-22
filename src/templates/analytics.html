@@ -123,14 +123,14 @@
             {#- the track form again, filled in with this session, for when
                 something about it was logged wrongly #}
             <p class="day-session-edit">
-              <a href="{{ url_for('main.track', session_id=s.id) }}">Correct this session</a>
+              <a class="ghost" href="{{ url_for('main.track', session_id=s.id) }}">Correct this session</a>
             </p>
           </article>
         {% endfor %}
       {% else %}
         <p class="empty">Nothing logged on this day{% if user %} by {{ user.name }}{% endif %}.</p>
       {% endif %}
-      <p><a class="day-close" href="{{ url_for('main.analytics', user_id=(user.id if user else none)) }}">Close this day</a></p>
+      <p><a class="ghost" href="{{ url_for('main.analytics', user_id=(user.id if user else none)) }}">Close this day</a></p>
     </div>
   {% endif %}
 {% endmacro %}

@@ -123,13 +123,24 @@ button {
   margin-top: 0.75rem;
 }
 button:hover { background: #21344f; }
-button.ghost {
+/* The quiet button: the one that removes an extra-exercise row, and the links
+   out of a day on the analytics page, which are the same thing to look at. It
+   is a class rather than `button.ghost` so an <a> can wear it too, and it
+   therefore restates what the `button` rule above gives a button for free. */
+.ghost {
+  display: inline-block;
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 400;
+  padding: 0.65rem 1.2rem;
+  border-radius: 4px;
   background: transparent;
   color: var(--ink);
   border: 1px dashed var(--ink-soft);
-  font-weight: 400;
+  text-decoration: none;
+  cursor: pointer;
 }
-button.ghost:hover { border-style: solid; }
+.ghost:hover { background: transparent; border-style: solid; }
 
 .field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; }
 .field-row label { display: block; }
@@ -304,9 +315,9 @@ a.cell:hover, a.cell:focus-visible { outline: 2px solid var(--ink); outline-offs
   padding: 0.1rem 0.45rem;
   vertical-align: middle;
 }
-.day-close { font-size: 0.85rem; }
-/* The way back into the track form for a session that needs correcting. */
-.day-session-edit { margin: 0.5rem 0 0; font-size: 0.85rem; }
+/* The way back into the track form for a session that needs correcting, and
+   the way out of the day — both `.ghost`, which carries their whole look. */
+.day-session-edit { margin: 0.5rem 0 0; }
 
 /* Saving a correction, next to the way out of it. */
 .form-actions { display: flex; align-items: center; gap: 1rem; }
