@@ -32,7 +32,7 @@
               {%- set caption = cell.date ~ ": " ~ cell.count ~ " " ~ unit ~ ("" if cell.count == 1 else "s")
                    ~ (" · " ~ (category.label if category else cell.category) if cell.category else "") -%}
               {% if linked and cell.count %}
-                <a class="{{ classes }}"{% if category %} style="--heat: {{ category.color }}"{% endif %} href="{{ url_for('main.analytics', user_id=(user.id if user else none), day=cell.date, _anchor='day') }}" title="{{ caption }}" aria-label="{{ caption }}"></a>
+                <a class="{{ classes }}"{% if category %} style="--heat: {{ category.color }}"{% endif %} href="{{ url_for('main.analytics', **dict(filter_args, day=cell.date, _anchor='day')) }}" title="{{ caption }}" aria-label="{{ caption }}"></a>
               {% else %}
                 <span class="{{ classes }}"{% if category %} style="--heat: {{ category.color }}"{% endif %} title="{{ caption }}"></span>
               {% endif %}
@@ -52,8 +52,7 @@
 {%- if trend.direction -%}
   {%- set arrows = {'up': '↑', 'down': '↓', 'similar': '→'} -%}
   {%- set words = {'up': 'going up', 'down': 'going down', 'similar': 'holding steady'} -%}
-  {%- set pct = ((trend.change * 100) | round | int) if trend.change is not none else none -%}
-  <span class="trend trend-{{ trend.direction }}" title="Earlier half: {{ trend.early }} repetitions up to {{ trend.split }}. Later half: {{ trend.late }}.">{{ arrows[trend.direction] }} {{ words[trend.direction] }}{% if pct is not none %} ({{ '+' if pct > 0 else '' }}{{ pct }}%){% endif %}</span>
+  <span class="trend trend-{{ trend.direction }}" title="Previous session: {{ trend.previous }} repetitions on {{ trend.previous_date.strftime('%d %b %Y') }}. Latest: {{ trend.latest }} on {{ trend.latest_date.strftime('%d %b %Y') }}.">{{ arrows[trend.direction] }} {{ words[trend.direction] }}{% if trend.change %} ({{ '+' if trend.change > 0 else '' }}{{ trend.change }} reps){% endif %}</span>
 {%- endif -%}
 {%- endmacro %}
 
@@ -128,9 +127,9 @@
           </article>
         {% endfor %}
       {% else %}
-        <p class="empty">Nothing logged on this day{% if user %} by {{ user.name }}{% endif %}.</p>
+        <p class="empty">Nothing logged on this day{% if user %} by {{ user.name }}{% endif %}{% if sport %} in {{ sport.label }}{% endif %}.</p>
       {% endif %}
-      <p><a class="ghost" href="{{ url_for('main.analytics', user_id=(user.id if user else none)) }}">Close this day</a></p>
+      <p><a class="ghost" href="{{ url_for('main.analytics', **filter_args) }}">Close this day</a></p>
     </div>
   {% endif %}
 {% endmacro %}
@@ -138,8 +137,10 @@
 {% block content %}
 <h1>Analytics</h1>
 
-{# Picking a user reloads the page with ?user_id=, so every section below is
-   computed for that user alone. The submit button keeps it working without JS. #}
+{# Picking a user reloads the page with ?user_id=, and picking a sort of sport
+   with ?category=, so every section below is computed for that user and that
+   sport alone. Both dropdowns sit in one form, so changing either keeps the
+   other. The submit button keeps it working without JS. #}
 <form method="get" action="{{ url_for('main.analytics') }}" class="user-filter">
   <label for="{{ user_field }}">Show</label>
   <select id="{{ user_field }}" name="{{ user_field }}" onchange="this.form.submit()">
@@ -148,13 +149,22 @@
       <option value="{{ u.id }}" {% if user and u.id == user.id %}selected{% endif %}>{{ u.name }}</option>
     {% endfor %}
   </select>
-  {#- the day survives a change of user, so the panel follows the filter #}
+  <label for="{{ category_field }}">in</label>
+  <select id="{{ category_field }}" name="{{ category_field }}" onchange="this.form.submit()">
+    <option value="">All sports</option>
+    {% for c in categories.values() %}
+      <option value="{{ c.value }}" {% if sport and c.value == sport.value %}selected{% endif %}>{{ c.label }}</option>
+    {% endfor %}
+  </select>
+  {#- the day survives a change of filter, so the panel follows it #}
   {% if day %}<input type="hidden" name="{{ day_field }}" value="{{ day.isoformat() }}">{% endif %}
   <button type="submit">Show</button>
 </form>
 <p class="lede">
   {%- if user %}
-    Everything {{ user.name }} ({{ user.age }}) has logged — only the workouts and exercises they have actually performed.
+    Everything {{ user.name }} ({{ user.age }}) has logged{% if sport %} in {{ sport.label }}{% endif %} — only the workouts and exercises they have actually performed.
+  {%- elif sport %}
+    Everything logged in {{ sport.label }}, across all users — only the workouts and exercises actually performed in it.
   {%- else %}
     Everything logged so far, across all users. Pick a user above for their numbers alone.
   {%- endif %}
@@ -195,8 +205,8 @@
         {% endfor %}
       </tbody>
     </table>
-  {% elif user %}
-    <p class="empty">{{ user.name }} hasn't performed a workout yet — <a href="{{ url_for('main.track') }}">track one</a>.</p>
+  {% elif user or sport %}
+    <p class="empty">{% if user %}{{ user.name }} hasn't{% else %}Nobody has{% endif %} performed a workout{% if sport %} in {{ sport.label }}{% endif %} yet — <a href="{{ url_for('main.track') }}">track one</a>.</p>
   {% else %}
     <p class="empty">No workouts yet — <a href="{{ url_for('main.create') }}">create one</a> to get started.</p>
   {% endif %}
@@ -253,7 +263,7 @@
 
 <section>
   <h2>Repetitions per exercise</h2>
-  <p class="lede">{% if user %}Every exercise {{ user.name }} has performed{% else %}Every exercise across all of your workouts{% endif %}, and how many repetitions you did of it on each day of the last 12 months. Repetitions are counted the same whether or not you carried extra weight. Where you did, the weight moved is the extra weight of each set counted once per repetition of it, so a heavy set of few repetitions and a light set of many are comparable; an exercise you only ever did at bodyweight is reported in repetitions alone. Each exercise is shaded against its own busiest day. The trend splits an exercise's history in half and compares the repetitions in each, so it says whether you are doing more of it, less of it, or about the same.</p>
+  <p class="lede">{% if user %}Every exercise {{ user.name }} has performed{% if sport %} in {{ sport.label }}{% endif %}{% elif sport %}Every exercise performed in {{ sport.label }}{% else %}Every exercise across all of your workouts{% endif %}, and how many repetitions you did of it on each day of the last 12 months. Repetitions are counted the same whether or not you carried extra weight. Where you did, the weight moved is the extra weight of each set counted once per repetition of it, so a heavy set of few repetitions and a light set of many are comparable; an exercise you only ever did at bodyweight is reported in repetitions alone. Each exercise is shaded against its own busiest day. The trend compares the repetitions of the last two sessions an exercise was logged in, so it says whether you did more of it last time, less of it, or exactly the same.</p>
   {% if exercises %}
     {%- set weighted_rows = exercises | selectattr('weighted') | list %}
     <div class="stat-row">
@@ -290,8 +300,8 @@
         {% endif %}
       </article>
     {% endfor %}
-  {% elif user %}
-    <p class="empty">{{ user.name }} hasn't performed an exercise yet — <a href="{{ url_for('main.track') }}">track a session</a>.</p>
+  {% elif user or sport %}
+    <p class="empty">{% if user %}{{ user.name }} hasn't{% else %}Nobody has{% endif %} performed an exercise{% if sport %} in {{ sport.label }}{% endif %} yet — <a href="{{ url_for('main.track') }}">track a session</a>.</p>
   {% else %}
     <p class="empty">Nothing to analyse yet — create a workout and track a session first.</p>
   {% endif %}
@@ -313,8 +323,8 @@
         </li>
       {% endfor %}
     </ol>
-  {% elif user %}
-    <p class="empty">{{ user.name }} hasn't left a comment yet — add one when you <a href="{{ url_for('main.track') }}">track a session</a>.</p>
+  {% elif user or sport %}
+    <p class="empty">{% if user %}{{ user.name }} hasn't{% else %}Nobody has{% endif %} left a comment{% if sport %} in {{ sport.label }}{% endif %} yet — add one when you <a href="{{ url_for('main.track') }}">track a session</a>.</p>
   {% else %}
     <p class="empty">No comments yet — add one when you <a href="{{ url_for('main.track') }}">track a session</a>.</p>
   {% endif %}

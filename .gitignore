@@ -16,3 +16,4 @@ instance/
 .env
 .env.*
 !.env.example
+MOVING_THE_DATABASE.md

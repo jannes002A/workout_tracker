@@ -33,7 +33,7 @@ EXTRA_REPS_FIELD = "extra-reps"  # done in this session only
 EXTRA_WEIGHT_FIELD = "extra-weight"
 EXTRA_SETS_FIELD = "extra-sets"
 MODE_FIELD = "tracking_mode"  # counts the session in totals or in sets
-CATEGORY_FIELD = "category"  # the workout's sort of sport, on the create form
+CATEGORY_FIELD = "category"  # the workout's sort of sport on /create, filters /analytics
 CATEGORY_LABEL_FIELD = "label"  # names the sort of sport being added
 NO_WEIGHT_VALUE = ""  # the weight dropdown's "no extra weight" option
 USER_FIELD = "user_id"  # picks the user on /track, filters /analytics
@@ -312,32 +312,42 @@ def _session_summary(session) -> str:
 def analytics():
     """Page 3: activity map, workouts performed, repetitions, feeling trend.
 
-    A `user_id` in the query string narrows every section to that user; without
-    it — or with an id that no longer exists — the page covers everyone. A `day`
+    A `user_id` in the query string narrows every section to that user, and a
+    `category` to the sessions of that sort of sport; without them — or with a
+    value nothing answers to — the page covers everyone and every sport. A `day`
     opens the activity map on that date, listing the sessions behind its cell;
     that is a link on every day that has one, so the drill-down needs no JS.
     """
     user = services.get_user(_selected_user_id(request.args))
     user_id = user.id if user else None
+    categories = services.category_map()
+    sport = categories.get(request.args.get(CATEGORY_FIELD, ""))
+    category = sport.value if sport else None
+    filters = {"user_id": user_id, "category": category}
     day = _selected_day(request.args)
     return render_template(
         "analytics.html",
-        activity=services.activity_map(user_id=user_id),
+        activity=services.activity_map(**filters),
         day=day,
         day_field=DAY_FIELD,
         # Nothing to list until a day is picked, and the query is skipped
         # entirely rather than asked about a date that isn't there.
-        day_sessions=services.day_sessions(day, user_id=user_id) if day else [],
-        frequency=services.workout_frequency(user_id=user_id),
-        exercises=services.exercise_repetitions(user_id=user_id),
-        trend=services.feeling_trend(user_id=user_id),
-        comments=services.session_comments(user_id=user_id),
+        day_sessions=services.day_sessions(day, **filters) if day else [],
+        frequency=services.workout_frequency(**filters),
+        exercises=services.exercise_repetitions(**filters),
+        trend=services.feeling_trend(**filters),
+        comments=services.session_comments(**filters),
         trend_days=services.TREND_DAYS,
         comment_limit=services.COMMENT_LIMIT,
         users=services.get_all_users(),
         user=user,
         user_field=USER_FIELD,
-        categories=services.category_map(),
+        sport=sport,
+        category_field=CATEGORY_FIELD,
+        # what every link back to this page carries, so following one keeps
+        # the filters; None values drop out of the query string
+        filter_args={USER_FIELD: user_id, CATEGORY_FIELD: category},
+        categories=categories,
         weight_unit=WEIGHT_UNIT,
     )
 

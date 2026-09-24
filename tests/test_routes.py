@@ -971,6 +971,78 @@ def test_analytics_day_links_keep_the_selected_user(client, app, user):
     assert f'href="/analytics?user_id={user.id}&amp;day={date.today().isoformat()}#day"' in html
 
 
+def log_weights_and_judo(app, user):
+    """A Leg day (weights) and a Randori (judo) session, both today."""
+    with app.app_context():
+        legs = services.create_workout("Leg day", ["Squat"])
+        judo = services.create_workout("Randori", ["Uchi-komi"], "judo")
+        services.log_session(
+            legs.id, user.id, date.today(), 45, {legs.exercises[0].id: 30}, "good",
+            comment="Heavy legs.",
+        )
+        services.log_session(
+            judo.id, user.id, date.today(), 60, {judo.exercises[0].id: 50}, "bad",
+            comment="Tired on the mat.",
+        )
+
+
+def test_analytics_page_offers_a_sport_dropdown(client, app):
+    html = client.get("/analytics").data.decode()
+    assert f'name="{routes.CATEGORY_FIELD}"' in html
+    assert ">All sports</option>" in html
+    for _, label, _ in DEFAULT_CATEGORIES:
+        assert f">{label}</option>" in html
+
+
+def test_analytics_page_filtered_by_sport_shows_only_that_sport(client, app, user):
+    log_weights_and_judo(app, user)
+    html = client.get("/analytics?category=judo").data.decode()
+    assert 'value="judo" selected' in html
+    assert "Everything logged in Judo" in html
+    assert "Randori" in html and "Tired on the mat." in html
+    assert "Leg day" not in html and "Heavy legs." not in html
+
+
+def test_analytics_page_filters_by_user_and_sport_together(client, app, user, other_user):
+    log_weights_and_judo(app, user)
+    html = client.get(f"/analytics?user_id={other_user.id}&category=judo").data.decode()
+    assert "Everything Sam (41) has logged in Judo" in html
+    assert "Sam hasn't performed a workout in Judo yet" in html
+
+
+def test_analytics_page_ignores_an_unknown_sport(client, app, user):
+    log_weights_and_judo(app, user)
+    html = client.get("/analytics?category=curling").data.decode()
+    assert "Leg day" in html and "Randori" in html
+    assert "Everything logged so far, across all users" in html
+
+
+def test_analytics_page_says_when_nobody_did_a_sport(client, app, user):
+    log_weights_and_judo(app, user)
+    html = client.get("/analytics?category=mobility").data.decode()
+    assert "Nobody has performed a workout in Mobility yet" in html
+    assert "Nobody has left a comment in Mobility yet" in html
+
+
+def test_analytics_day_links_keep_the_selected_sport(client, app, user):
+    log_weights_and_judo(app, user)
+    today = date.today().isoformat()
+    html = client.get(f"/analytics?user_id={user.id}&category=judo").data.decode()
+    assert f'href="/analytics?user_id={user.id}&amp;category=judo&amp;day={today}#day"' in html
+    panel = client.get(f"/analytics?category=judo&day={today}").data.decode()
+    assert 'href="/analytics?category=judo">Close this day</a>' in panel
+    # the filter form carries the open day, so changing either dropdown keeps it
+    assert f'name="{routes.DAY_FIELD}" value="{today}"' in panel
+
+
+def test_analytics_day_panel_lists_only_the_selected_sport(client, app, user):
+    log_weights_and_judo(app, user)
+    html = client.get(f"/analytics?category=weights&day={date.today().isoformat()}").data.decode()
+    panel = html[html.index('class="day-detail"') : html.index("Workouts performed")]
+    assert "Leg day" in panel
+    assert "Randori" not in panel
+
+
 def test_analytics_day_shows_the_sessions_behind_a_cell(client, app, user):
     with app.app_context():
         workout = services.create_workout("Leg day", ["Squat", "Lunge"], "judo")
@@ -1212,7 +1284,7 @@ def test_analytics_page_badges_each_exercises_trend(client, app, user):
     assert "→ holding steady" in section
 
 
-def test_analytics_page_omits_the_trend_when_there_is_one_date(client, app, user):
+def test_analytics_page_omits_the_trend_when_there_is_one_session(client, app, user):
     with app.app_context():
         workout = services.create_workout("Leg day", ["Squat"])
         services.log_session(workout.id, user.id, date.today(), 45, {workout.exercises[0].id: 30}, "good")
@@ -1222,17 +1294,33 @@ def test_analytics_page_omits_the_trend_when_there_is_one_date(client, app, user
     assert 'class="trend' not in section
 
 
-def test_analytics_trend_badge_shows_the_percentage_change(client, app, user):
+def test_analytics_trend_badge_shows_the_absolute_change(client, app, user):
     with app.app_context():
         workout = services.create_workout("Leg day", ["Squat"])
         exercise_id = workout.exercises[0].id
-        services.log_session(
-            workout.id,
-            user.id, date.today() - timedelta(days=2), 45, {exercise_id: 20}, "good"
-        )
-        services.log_session(workout.id, user.id, date.today(), 45, {exercise_id: 30}, "good")
+        for days_ago, reps in ((4, 50), (2, 20), (0, 30)):
+            services.log_session(
+                workout.id,
+                user.id, date.today() - timedelta(days=days_ago), 45,
+                {exercise_id: reps}, "good",
+            )
     html = client.get("/analytics").data.decode()
-    assert "↑ going up (+50%)" in html
+    assert "↑ going up (+10 reps)" in html  # 20 → 30; the 50 before is ignored
+    assert "Previous session: 20 repetitions" in html
+
+
+def test_analytics_trend_badge_shows_no_change_when_holding_steady(client, app, user):
+    with app.app_context():
+        workout = services.create_workout("Leg day", ["Squat"])
+        exercise_id = workout.exercises[0].id
+        for days_ago in (2, 0):
+            services.log_session(
+                workout.id,
+                user.id, date.today() - timedelta(days=days_ago), 45,
+                {exercise_id: 20}, "good",
+            )
+    html = client.get("/analytics").data.decode()
+    assert "→ holding steady</span>" in html
 
 
 def test_analytics_page_offers_a_user_dropdown(client, app):

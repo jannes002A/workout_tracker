@@ -46,7 +46,6 @@ DEFAULT_TRACKING_MODE = TOTAL_MODE
 WEIGHT_UNIT = "kg"  # only ever displayed; nothing converts between units
 TREND_DAYS = 30  # window of the feeling graph on the analytics page
 EXERCISE_HEATMAP_DAYS = 365  # window of each per-exercise heatmap
-REPETITION_TREND_TOLERANCE = 0.15  # within ±15% counts as holding steady
 COMMENT_LIMIT = 5  # how many session notes the analytics page lists
 MIN_AGE, MAX_AGE = 1, 120  # bounds of the age field, and of its error message
 MAX_CATEGORY_LABEL = 40  # cap on the name of a sort of sport, and its input's
@@ -642,16 +641,22 @@ def date_choices(
 # ---------------------------------------------------------------- analytics
 
 
-def _for_user(query, user_id: int | None):
-    """Narrow a query that selects sessions down to one user.
+def _filtered(query, user_id: int | None, category: str | None):
+    """Narrow a query that selects sessions down to one user and one sport.
 
-    Every analytics function takes a `user_id`; None means "everyone", which is
-    what the page shows until a user is picked from its dropdown. Apply this
-    before grouping, so the filter lands in the WHERE clause.
+    Every analytics function takes a `user_id` and a `category`; None means
+    "everyone" and "every sort of sport", which is what the page shows until
+    something is picked from its dropdowns. The sport is the session's own
+    copy, `WorkoutSession.category` — the one the activity map colours a day
+    by — so re-labelling a workout does not move its past sessions from one
+    filter to another. Apply this before grouping, so the filter lands in the
+    WHERE clause.
     """
-    if user_id is None:
-        return query
-    return query.filter(WorkoutSession.user_id == user_id)
+    if user_id is not None:
+        query = query.filter(WorkoutSession.user_id == user_id)
+    if category is not None:
+        query = query.filter(WorkoutSession.category == category)
+    return query
 
 
 # The SQL twin of SessionExercise.weight_moved: the extra weight counted once
@@ -734,51 +739,42 @@ def _calendar_weeks(
     return {"weeks": weeks, "max": max_count, "months": months}
 
 
-def _repetition_trend(dates: dict[date_type, int]) -> dict:
-    """Whether an exercise's repetitions are going up, going down or holding.
+def _repetition_trend(sessions: list[tuple[date_type, int, int]]) -> dict:
+    """Whether an exercise's repetitions went up, down or held last time.
 
-    Splits the exercise's own history — the span from the first date it was
-    performed to the last — into two halves of equal length and compares the
-    repetitions done in each. Returns
-    {"direction": "up" | "down" | "similar" | None, "early": int, "late": int,
-     "change": float | None, "split": iso string | None}, where `change` is the
-    fraction the later half differs by (0.5 being +50%) and `split` is the last
-    date counted as early.
+    Compares the last two sessions the exercise was logged in, given as
+    (date, session id, repetitions) triples in any order. They are ordered by
+    date and then by session id, so two sessions on one day compete in the
+    order they were logged rather than being merged. Returns
+    {"direction": "up" | "down" | "similar" | None, "previous": int,
+     "latest": int, "change": int | None, "previous_date": date | None,
+     "latest_date": date | None}, where `change` is the absolute difference
+    in repetitions, latest minus previous. Only no difference at all counts
+    as "similar".
 
-    `direction` is None when everything falls on a single date, which is too
-    little to read a trend from. A change within REPETITION_TREND_TOLERANCE
-    either way counts as "similar". For an even span the earlier half takes the
-    middle day. `change` is None when the earlier half is 0, since there is no
-    baseline to be a percentage of.
+    `direction` and `change` are None for an exercise logged in fewer than two
+    sessions, which is too little to read a trend from.
     """
-    nothing = {"direction": None, "early": 0, "late": 0, "change": None, "split": None}
-    if not dates:
-        return nothing
+    if len(sessions) < 2:
+        return {
+            "direction": None,
+            "previous": 0,
+            "latest": 0,
+            "change": None,
+            "previous_date": None,
+            "latest_date": None,
+        }
 
-    first, last = min(dates), max(dates)
-    span = (last - first).days
-    if span == 0:
-        return nothing
-
-    split = first + timedelta(days=span // 2)
-    early = sum(reps for day, reps in dates.items() if day <= split)
-    late = sum(reps for day, reps in dates.items() if day > split)
-
-    if early == 0:
-        direction, change = ("up" if late > 0 else "similar"), None
-    else:
-        change = (late - early) / early
-        if abs(change) <= REPETITION_TREND_TOLERANCE:
-            direction = "similar"
-        else:
-            direction = "up" if change > 0 else "down"
-
+    (previous_date, _, previous), (latest_date, _, latest) = sorted(sessions)[-2:]
+    change = latest - previous
+    direction = "up" if change > 0 else "down" if change < 0 else "similar"
     return {
         "direction": direction,
-        "early": early,
-        "late": late,
+        "previous": previous,
+        "latest": latest,
         "change": change,
-        "split": split.isoformat(),
+        "previous_date": previous_date,
+        "latest_date": latest_date,
     }
 
 
@@ -793,7 +789,10 @@ def _category_rank(category: str, order: dict[str, int]) -> int:
 
 
 def activity_map(
-    end: date_type | None = None, days: int = 365, user_id: int | None = None
+    end: date_type | None = None,
+    days: int = 365,
+    user_id: int | None = None,
+    category: str | None = None,
 ) -> dict:
     """GitHub-style activity data: one cell per day for the last `days` days.
 
@@ -810,13 +809,14 @@ def activity_map(
     start = end - timedelta(days=days - 1)
 
     rows = (
-        _for_user(
+        _filtered(
             db.session.query(
                 WorkoutSession.date,
                 WorkoutSession.category,
                 db.func.count(WorkoutSession.id),
             ).filter(WorkoutSession.date >= start, WorkoutSession.date <= end),
             user_id,
+            category,
         )
         .group_by(WorkoutSession.date, WorkoutSession.category)
         .all()
@@ -837,7 +837,9 @@ def activity_map(
     return _calendar_weeks(counts, end, days, categories)
 
 
-def day_sessions(day: date_type, user_id: int | None = None) -> list[dict]:
+def day_sessions(
+    day: date_type, user_id: int | None = None, category: str | None = None
+) -> list[dict]:
     """Everything logged on one day, in the order it was logged.
 
     This is what a click on a cell of the activity map opens: the sessions
@@ -862,7 +864,11 @@ def day_sessions(day: date_type, user_id: int | None = None) -> list[dict]:
     a link on one person's map need not be one on another's.
     """
     sessions = (
-        _for_user(WorkoutSession.query.filter(WorkoutSession.date == day), user_id)
+        _filtered(
+            WorkoutSession.query.filter(WorkoutSession.date == day),
+            user_id,
+            category,
+        )
         .order_by(WorkoutSession.id)
         .all()
     )
@@ -896,34 +902,36 @@ def day_sessions(day: date_type, user_id: int | None = None) -> list[dict]:
     ]
 
 
-def workout_frequency(user_id: int | None = None) -> list[dict]:
+def workout_frequency(
+    user_id: int | None = None, category: str | None = None
+) -> list[dict]:
     """How often each workout has been done and how it felt, most frequent first.
 
     Each row is {"name": str, "count": int, "feelings": {feeling: count}}, with
     a `feelings` entry for every value in FEELINGS.
 
-    Across everyone the table doubles as a list of what exists, so workouts
-    never performed are included with a count of 0. For a single user those
-    rows are just noise, so `user_id` lists only the workouts that user has
-    actually performed — an inner join rather than an outer one.
+    Across everyone and every sport the table doubles as a list of what exists,
+    so workouts never performed are included with a count of 0. For a single
+    user or a single sort of sport those rows are just noise, so a `user_id` or
+    a `category` lists only the workouts actually performed under that filter —
+    an inner join rather than an outer one.
     """
     on_workout = WorkoutSession.workout_id == Workout.id
     query = db.session.query(Workout.name, db.func.count(WorkoutSession.id))
-    if user_id is None:
+    if user_id is None and category is None:
         query = query.outerjoin(WorkoutSession, on_workout)
     else:
-        query = query.join(WorkoutSession, on_workout).filter(
-            WorkoutSession.user_id == user_id
-        )
+        query = _filtered(query.join(WorkoutSession, on_workout), user_id, category)
     rows = query.group_by(Workout.id).all()
     by_feeling = (
-        _for_user(
+        _filtered(
             db.session.query(
                 Workout.name,
                 WorkoutSession.feeling,
                 db.func.count(WorkoutSession.id),
             ).join(WorkoutSession, WorkoutSession.workout_id == Workout.id),
             user_id,
+            category,
         )
         .group_by(Workout.name, WorkoutSession.feeling)
         .all()
@@ -942,7 +950,9 @@ def workout_frequency(user_id: int | None = None) -> list[dict]:
 
 
 def exercise_repetitions(
-    end: date_type | None = None, user_id: int | None = None
+    end: date_type | None = None,
+    user_id: int | None = None,
+    category: str | None = None,
 ) -> list[dict]:
     """Repetitions per exercise across every workout, most repetitions first.
 
@@ -978,9 +988,9 @@ def exercise_repetitions(
     both read the whole history rather than the last EXERCISE_HEATMAP_DAYS days,
     so a best session can predate the grid it is shown above.
 
-    `trend` says whether its repetitions are going up, down or holding steady;
-    see `_repetition_trend`. It reads the exercise's whole history, not just the
-    window drawn in `heatmap`.
+    `trend` says whether its repetitions went up, down or held between the last
+    two sessions it was logged in; see `_repetition_trend`. Those sessions can
+    predate the window drawn in `heatmap`.
 
     `heatmap` is the exercise's history as a calendar grid of the last
     EXERCISE_HEATMAP_DAYS days — the same shape as `activity_map`, but with each
@@ -1012,7 +1022,7 @@ def exercise_repetitions(
                 "extra": False,
                 "heatmap": None,
                 "best_session": None,
-                "trend": _repetition_trend({}),
+                "trend": _repetition_trend([]),
             },
         )
 
@@ -1035,17 +1045,18 @@ def exercise_repetitions(
     # is what keeps an exercise done only as an extra from being labelled with
     # the workout that happens to have an exercise of the same name.
     performed_in: dict[str, set[str]] = {}
-    for exercise_name, workout_name in _for_user(
+    for exercise_name, workout_name in _filtered(
         db.session.query(Exercise.name, Workout.name)
         .join(SessionExercise, SessionExercise.exercise_id == Exercise.id)
         .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id)
         .join(Workout, Workout.id == WorkoutSession.workout_id),
         user_id,
+        category,
     ).distinct():
         performed_in.setdefault(exercise_name, set()).add(workout_name)
 
     logged = (
-        _for_user(
+        _filtered(
             db.session.query(
                 Exercise.name,
                 db.func.sum(SessionExercise.repetitions),
@@ -1056,6 +1067,7 @@ def exercise_repetitions(
             .join(SessionExercise, SessionExercise.exercise_id == Exercise.id)
             .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id),
             user_id,
+            category,
         )
         .group_by(Exercise.name)
         .all()
@@ -1069,7 +1081,7 @@ def exercise_repetitions(
 
     # Extras carry their own name instead of pointing at an exercise row.
     extras = (
-        _for_user(
+        _filtered(
             db.session.query(
                 SessionExercise.extra_name,
                 db.func.sum(SessionExercise.repetitions),
@@ -1080,6 +1092,7 @@ def exercise_repetitions(
             .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id)
             .filter(SessionExercise.exercise_id.is_(None)),
             user_id,
+            category,
         )
         .group_by(SessionExercise.extra_name)
         .all()
@@ -1092,16 +1105,18 @@ def exercise_repetitions(
         row["weighted"] = row["weighted"] or bool(weighted)
         row["extra"] = True
 
-    # One row per session an exercise was logged in, which gives both the
-    # repetitions per date the heatmap and the trend are drawn from — summed
-    # when an exercise landed twice on one day, possible across two sessions —
-    # and the weight per session the best one is picked out of. That weight is
+    # One row per session an exercise was logged in, which gives the
+    # repetitions per date the heatmap is drawn from — summed when an exercise
+    # landed twice on one day, possible across two sessions — the repetitions
+    # per session the trend compares, and the weight per session the best one
+    # is picked out of. That weight is
     # NULL for a session done with no extra weight, which is what keeps such a
     # session out of the running for `best_session`.
     per_date: dict[str, dict[date_type, int]] = {}
+    per_session: dict[str, list[tuple[date_type, int, int]]] = {}
     best: dict[str, tuple[int, date_type, int]] = {}
     linked_sessions = (
-        _for_user(
+        _filtered(
             db.session.query(
                 Exercise.name,
                 WorkoutSession.date,
@@ -1112,12 +1127,13 @@ def exercise_repetitions(
             .join(SessionExercise, SessionExercise.exercise_id == Exercise.id)
             .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id),
             user_id,
+            category,
         )
         .group_by(Exercise.name, WorkoutSession.id)
         .all()
     )
     extra_sessions = (
-        _for_user(
+        _filtered(
             db.session.query(
                 SessionExercise.extra_name,
                 WorkoutSession.date,
@@ -1128,6 +1144,7 @@ def exercise_repetitions(
             .join(WorkoutSession, WorkoutSession.id == SessionExercise.session_id)
             .filter(SessionExercise.exercise_id.is_(None)),
             user_id,
+            category,
         )
         .group_by(SessionExercise.extra_name, WorkoutSession.id)
         .all()
@@ -1135,6 +1152,7 @@ def exercise_repetitions(
     for name, day, session_id, reps, weight in linked_sessions + extra_sessions:
         dates = per_date.setdefault(name, {})
         dates[day] = dates.get(day, 0) + int(reps or 0)
+        per_session.setdefault(name, []).append((day, session_id, int(reps or 0)))
         if weight is None:
             continue  # bodyweight: repetitions only, nothing to be best at
         # Compared as a tuple, so a weight matched again is reported at the
@@ -1146,7 +1164,7 @@ def exercise_repetitions(
     for name, dates in per_date.items():
         row = bucket(name)
         row["heatmap"] = _calendar_weeks(dates, end, EXERCISE_HEATMAP_DAYS)
-        row["trend"] = _repetition_trend(dates)
+        row["trend"] = _repetition_trend(per_session[name])
         if name in best:  # absent for an exercise only ever done at bodyweight
             weight, day, _ = best[name]
             row["best_session"] = {"weight": weight, "date": day}
@@ -1158,9 +1176,9 @@ def exercise_repetitions(
         row["workouts"] = sorted(source or ())
 
     rows = list(buckets.values())
-    if user_id is not None:
+    if user_id is not None or category is not None:
         # Every exercise of every workout would otherwise show up on one
-        # person's page as a "Not performed yet" row. `times` is 0 for exactly
+        # person's, or one sport's, page as a "Not performed yet" row. `times` is 0 for exactly
         # those, and is what leaves `heatmap` None.
         rows = [row for row in rows if row["times"]]
     return sorted(rows, key=lambda r: (-r["repetitions"], r["name"]))
@@ -1170,6 +1188,7 @@ def feeling_trend(
     end: date_type | None = None,
     days: int = TREND_DAYS,
     user_id: int | None = None,
+    category: str | None = None,
 ) -> dict:
     """How the workouts of the last `days` days felt, one entry per day.
 
@@ -1186,13 +1205,14 @@ def feeling_trend(
     start = end - timedelta(days=days - 1)
 
     rows = (
-        _for_user(
+        _filtered(
             db.session.query(
                 WorkoutSession.date,
                 WorkoutSession.feeling,
                 db.func.count(WorkoutSession.id),
             ).filter(WorkoutSession.date >= start, WorkoutSession.date <= end),
             user_id,
+            category,
         )
         .group_by(WorkoutSession.date, WorkoutSession.feeling)
         .all()
@@ -1238,7 +1258,9 @@ def feeling_trend(
 
 
 def session_comments(
-    user_id: int | None = None, limit: int = COMMENT_LIMIT
+    user_id: int | None = None,
+    limit: int = COMMENT_LIMIT,
+    category: str | None = None,
 ) -> list[dict]:
     """The most recent sessions that carry a free-text note, newest first.
 
@@ -1257,7 +1279,7 @@ def session_comments(
     not their share of everyone's last `limit`.
     """
     rows = (
-        _for_user(
+        _filtered(
             db.session.query(
                 WorkoutSession.date,
                 Workout.name,
@@ -1270,6 +1292,7 @@ def session_comments(
             .join(User, User.id == WorkoutSession.user_id)
             .filter(WorkoutSession.comment.isnot(None)),
             user_id,
+            category,
         )
         .order_by(WorkoutSession.date.desc(), WorkoutSession.id.desc())
         .limit(limit)

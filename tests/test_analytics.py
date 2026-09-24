@@ -3,7 +3,7 @@ from datetime import date, timedelta
 import pytest
 
 from src import services
-from src.models import DEFAULT_CATEGORY
+from src.models import DEFAULT_CATEGORY, db
 
 
 @pytest.fixture()
@@ -322,10 +322,11 @@ def test_exercise_repetitions_includes_never_performed_exercises(app):
             "best_session": None,
             "trend": {
                 "direction": None,
-                "early": 0,
-                "late": 0,
+                "previous": 0,
+                "latest": 0,
                 "change": None,
-                "split": None,
+                "previous_date": None,
+                "latest_date": None,
             },
         }
     ]
@@ -751,7 +752,7 @@ def weekly(app, user):
             {
                 ids["Rising"]: 5 + week * 3,
                 ids["Falling"]: 40 - week * 3,
-                ids["Steady"]: 20 + (week % 2),
+                ids["Steady"]: 20,
             },
             "good",
         )
@@ -764,83 +765,92 @@ def trend_of(name, end=date(2026, 8, 15)):
     )["trend"]
 
 
+def log_squats(user, *days_and_reps):
+    """Log a Leg day with one Squat count per (date, repetitions) given."""
+    workout = services.create_workout("Leg day", ["Squat"])
+    exercise_id = workout.exercises[0].id
+    for day, reps in days_and_reps:
+        services.log_session(workout.id, user.id, day, 45, {exercise_id: reps}, "good")
+    return workout
+
+
 def test_trend_detects_rising_repetitions(app, weekly):
     trend = trend_of("Rising")
     assert trend["direction"] == "up"
-    assert trend["late"] > trend["early"]
-    assert trend["change"] > services.REPETITION_TREND_TOLERANCE
+    assert (trend["previous"], trend["latest"]) == (29, 32)  # weeks 8 and 9
+    assert trend["change"] == 3
 
 
 def test_trend_detects_falling_repetitions(app, weekly):
     trend = trend_of("Falling")
     assert trend["direction"] == "down"
-    assert trend["late"] < trend["early"]
-    assert trend["change"] < -services.REPETITION_TREND_TOLERANCE
+    assert (trend["previous"], trend["latest"]) == (16, 13)
+    assert trend["change"] == -3
 
 
-def test_trend_calls_small_changes_similar(app, weekly):
+def test_trend_is_similar_only_for_no_change_at_all(app, weekly):
     trend = trend_of("Steady")
     assert trend["direction"] == "similar"
-    assert abs(trend["change"]) <= services.REPETITION_TREND_TOLERANCE
+    assert trend["change"] == 0
 
 
-def test_trend_halves_account_for_every_repetition(app, weekly):
-    for row in services.exercise_repetitions(end=date(2026, 8, 15)):
-        assert row["trend"]["early"] + row["trend"]["late"] == row["repetitions"]
-
-
-def test_trend_change_is_the_fraction_the_later_half_differs_by(app, user):
-    workout = services.create_workout("Leg day", ["Squat"])
-    exercise_id = workout.exercises[0].id
-    services.log_session(workout.id, user.id, date(2026, 9, 1), 45, {exercise_id: 20}, "good")
-    services.log_session(workout.id, user.id, date(2026, 9, 3), 45, {exercise_id: 30}, "good")
+def test_trend_compares_the_last_two_sessions_only(app, user):
+    """Everything before the last two sessions is ignored."""
+    log_squats(
+        user,
+        (date(2026, 9, 1), 100),
+        (date(2026, 9, 3), 20),
+        (date(2026, 9, 5), 21),
+    )
     trend = trend_of("Squat", end=date(2026, 9, 8))
-    assert (trend["early"], trend["late"]) == (20, 30)
-    assert trend["change"] == 0.5  # +50%
-
-
-@pytest.mark.parametrize(
-    "tolerance_case,expected",
-    [(1.15, "similar"), (1.16, "up"), (0.85, "similar"), (0.84, "down")],
-)
-def test_trend_tolerance_boundary(app, tolerance_case, expected, user):
-    """±15% is still 'similar'; just past it becomes a direction."""
-    workout = services.create_workout("Leg day", ["Squat"])
-    exercise_id = workout.exercises[0].id
-    services.log_session(workout.id, user.id, date(2026, 9, 1), 45, {exercise_id: 100}, "good")
-    services.log_session(
-        workout.id,
-        user.id, date(2026, 9, 3), 45, {exercise_id: round(100 * tolerance_case)}, "good"
+    assert trend["direction"] == "up"  # despite the 100 before them
+    assert (trend["previous"], trend["latest"]) == (20, 21)
+    assert trend["change"] == 1
+    assert (trend["previous_date"], trend["latest_date"]) == (
+        date(2026, 9, 3), date(2026, 9, 5)
     )
-    assert trend_of("Squat", end=date(2026, 9, 8))["direction"] == expected
 
 
-def test_trend_is_unknown_for_a_single_date(app, user):
-    workout = services.create_workout("Leg day", ["Squat"])
-    services.log_session(
-        workout.id,
-        user.id, date(2026, 9, 1), 45, {workout.exercises[0].id: 30}, "good"
-    )
+def test_trend_change_is_the_absolute_difference(app, user):
+    log_squats(user, (date(2026, 9, 1), 20), (date(2026, 9, 3), 30))
+    trend = trend_of("Squat", end=date(2026, 9, 8))
+    assert trend["change"] == 10  # repetitions, not a fraction
+
+
+def test_trend_orders_sessions_by_date_not_by_logging_order(app, user):
+    """A session logged late for an earlier date is not the latest one."""
+    log_squats(user, (date(2026, 9, 5), 30), (date(2026, 9, 1), 50))
+    trend = trend_of("Squat", end=date(2026, 9, 8))
+    assert (trend["previous"], trend["latest"]) == (50, 30)
+    assert trend["direction"] == "down"
+
+
+def test_trend_compares_two_sessions_on_one_day(app, user):
+    """Same-day sessions compete in the order they were logged, not merged."""
+    log_squats(user, (date(2026, 9, 1), 10), (date(2026, 9, 1), 15))
+    trend = trend_of("Squat", end=date(2026, 9, 8))
+    assert (trend["previous"], trend["latest"]) == (10, 15)
+    assert trend["direction"] == "up"
+
+
+def test_trend_counts_up_from_zero(app, user):
+    log_squats(user, (date(2026, 9, 1), 0), (date(2026, 9, 3), 30))
+    trend = trend_of("Squat", end=date(2026, 9, 8))
+    assert trend["direction"] == "up"
+    assert trend["change"] == 30
+
+
+def test_trend_is_unknown_for_a_single_session(app, user):
+    log_squats(user, (date(2026, 9, 1), 30))
     trend = trend_of("Squat", end=date(2026, 9, 8))
     assert trend["direction"] is None
-    assert trend["split"] is None
+    assert trend["change"] is None
+    assert trend["latest_date"] is None
 
 
 def test_trend_is_unknown_for_a_exercise_never_performed(app):
     services.create_workout("Core day", ["Plank"])
     assert services.exercise_repetitions()[0]["trend"]["direction"] is None
-
-
-def test_trend_is_up_with_no_earlier_baseline(app, user):
-    """Nothing in the earlier half, something in the later one: up, but no %."""
-    workout = services.create_workout("Leg day", ["Squat"])
-    exercise_id = workout.exercises[0].id
-    services.log_session(workout.id, user.id, date(2026, 9, 1), 45, {exercise_id: 0}, "good")
-    services.log_session(workout.id, user.id, date(2026, 9, 3), 45, {exercise_id: 30}, "good")
-    trend = trend_of("Squat", end=date(2026, 9, 8))
-    assert trend["direction"] == "up"
-    assert (trend["early"], trend["late"]) == (0, 30)
-    assert trend["change"] is None
 
 
 def test_trend_of_extra_only_exercise(app, user):
@@ -854,19 +864,16 @@ def test_trend_of_extra_only_exercise(app, user):
     assert trend_of("Pull-up", end=date(2026, 9, 8))["direction"] == "up"
 
 
-def test_trend_reads_the_whole_history_not_just_the_heatmap_window(app, user):
+def test_trend_reads_sessions_outside_the_heatmap_window(app, user):
     """Sessions older than the heatmap window still shape the trend."""
-    workout = services.create_workout("Leg day", ["Squat"])
-    exercise_id = workout.exercises[0].id
-    services.log_session(workout.id, user.id, date(2020, 1, 1), 45, {exercise_id: 100}, "good")
-    services.log_session(workout.id, user.id, date(2026, 9, 1), 45, {exercise_id: 10}, "good")
+    log_squats(user, (date(2020, 1, 1), 100), (date(2026, 9, 1), 10))
     row = next(
         r for r in services.exercise_repetitions(end=date(2026, 9, 8))
         if r["name"] == "Squat"
     )
     assert row["heatmap"]["max"] == 10  # only the recent session is on the grid
     assert row["trend"]["direction"] == "down"  # but the trend sees both
-    assert (row["trend"]["early"], row["trend"]["late"]) == (100, 10)
+    assert (row["trend"]["previous"], row["trend"]["latest"]) == (100, 10)
 
 
 # ------------------------------------------------------------- feeling_trend
@@ -1096,14 +1103,14 @@ def test_exercise_heatmap_and_trend_are_per_user(app, two_users, user, other_use
     assert days["2026-09-01"] == 30
     assert days["2026-09-02"] == 0  # Sam's session leaves no mark on Alex's grid
     assert mine["Squat"]["heatmap"]["max"] == 30
-    # one date each side of the split, same count: holding steady
+    # two sessions of the same count: holding steady
     assert mine["Squat"]["trend"]["direction"] == "similar"
 
     theirs = {r["name"]: r for r in services.exercise_repetitions(
         end=end, user_id=other_user.id
     )}
     assert theirs["Squat"]["heatmap"]["max"] == 5
-    assert theirs["Squat"]["trend"]["direction"] is None  # a single date
+    assert theirs["Squat"]["trend"]["direction"] is None  # a single session
 
 
 def test_exercise_repetitions_without_a_user_covers_everyone(app, two_users):
@@ -1322,3 +1329,112 @@ def test_a_exercise_done_both_ways_keeps_the_workout_it_was_performed_in(app, us
     assert rows["Lunge"]["workouts"] == ["Leg day"]  # not Push day
     assert rows["Lunge"]["extra"] is True
     assert rows["Lunge"]["repetitions"] == 27
+
+
+# ------------------------------------------------------------ sport filter
+
+
+@pytest.fixture()
+def two_sports(app, user, other_user):
+    """A weights workout and a judo workout, with a note on each session.
+
+    Alex does Leg day on 1 September and Randori on 2 September; Sam does
+    Randori on 3 September. A third workout, Push day, is never performed.
+    """
+    legs = services.create_workout("Leg day", ["Squat"])
+    judo = services.create_workout("Randori", ["Uchi-komi"], "judo")
+    services.create_workout("Push day", ["Bench press"])
+    services.log_session(
+        legs.id, user.id, date(2026, 9, 1), 45, {legs.exercises[0].id: 30}, "good",
+        comment="Heavy legs.",
+    )
+    services.log_session(
+        judo.id, user.id, date(2026, 9, 2), 60, {judo.exercises[0].id: 50}, "bad",
+        extra_exercises=[("Break-fall", 10)],
+        comment="Tired on the mat.",
+    )
+    services.log_session(
+        judo.id, other_user.id, date(2026, 9, 3), 60, {judo.exercises[0].id: 40}, "okay",
+        comment="Good throws.",
+    )
+    return {"legs": legs, "judo": judo}
+
+
+def days_counted(activity):
+    return {c["date"]: c["count"] for week in activity["weeks"] for c in week if c and c["count"]}
+
+
+def test_activity_map_filters_by_sport(app, two_sports):
+    end = date(2026, 9, 8)
+    assert days_counted(services.activity_map(end=end, category="judo")) == {
+        "2026-09-02": 1, "2026-09-03": 1,
+    }
+    assert days_counted(services.activity_map(end=end, category="weights")) == {
+        "2026-09-01": 1,
+    }
+
+
+def test_activity_map_filters_by_user_and_sport_together(app, two_sports, user):
+    activity = services.activity_map(end=date(2026, 9, 8), user_id=user.id, category="judo")
+    assert days_counted(activity) == {"2026-09-02": 1}
+
+
+def test_day_sessions_filters_by_sport(app, two_sports):
+    assert services.day_sessions(date(2026, 9, 2), category="weights") == []
+    [session] = services.day_sessions(date(2026, 9, 2), category="judo")
+    assert session["workout"] == "Randori"
+
+
+def test_workout_frequency_for_a_sport_lists_only_what_was_performed_in_it(app, two_sports):
+    rows = services.workout_frequency(category="judo")
+    assert [(r["name"], r["count"]) for r in rows] == [("Randori", 2)]
+    assert rows[0]["feelings"] == {"good": 0, "okay": 1, "bad": 1}
+    # Leg day and the never-performed Push day are not judo sessions
+
+
+def test_workout_frequency_for_user_and_sport(app, two_sports, user, other_user):
+    rows = services.workout_frequency(user_id=other_user.id, category="weights")
+    assert rows == []
+    rows = services.workout_frequency(user_id=user.id, category="judo")
+    assert [(r["name"], r["count"]) for r in rows] == [("Randori", 1)]
+
+
+def test_workout_frequency_without_filters_still_lists_unperformed_workouts(app, two_sports):
+    names = {r["name"]: r["count"] for r in services.workout_frequency()}
+    assert names["Push day"] == 0
+
+
+def test_exercise_repetitions_filters_by_sport(app, two_sports):
+    rows = {r["name"]: r for r in services.exercise_repetitions(
+        end=date(2026, 9, 8), category="judo"
+    )}
+    # no Squat (weights) and no never-performed Bench press
+    assert sorted(rows) == ["Break-fall", "Uchi-komi"]
+    assert rows["Uchi-komi"]["repetitions"] == 90
+    assert rows["Uchi-komi"]["times"] == 2
+    assert rows["Break-fall"]["extra"] is True
+
+
+def test_exercise_repetitions_for_a_sport_nobody_did_is_empty(app, two_sports):
+    assert services.exercise_repetitions(end=date(2026, 9, 8), category="mobility") == []
+
+
+def test_feeling_trend_filters_by_sport(app, two_sports):
+    trend = services.feeling_trend(end=date(2026, 9, 8), category="judo")
+    assert trend["totals"] == {"good": 0, "okay": 1, "bad": 1}
+    assert trend["sessions"] == 2
+
+
+def test_session_comments_filter_by_sport(app, two_sports, user):
+    comments = services.session_comments(category="judo")
+    assert [c["comment"] for c in comments] == ["Good throws.", "Tired on the mat."]
+    mine = services.session_comments(user_id=user.id, category="weights")
+    assert [c["comment"] for c in mine] == ["Heavy legs."]
+
+
+def test_sport_filter_follows_the_session_not_the_workout(app, two_sports):
+    """Re-labelling a workout does not move its past sessions to another sport."""
+    two_sports["legs"].category = "mobility"
+    db.session.commit()
+    assert [r["name"] for r in services.workout_frequency(category="weights")] == ["Leg day"]
+    assert services.workout_frequency(category="mobility") == []

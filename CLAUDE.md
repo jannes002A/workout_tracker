@@ -270,7 +270,7 @@ the day the session now falls on. `date_choices(include=...)` is what keeps the
 date dropdown honest for a session older than its 31-day window — without it
 saving would silently move the session to a date the dropdown does offer.
 
-`_repetitions_from_form`, `_weights_from_form`, `_sets_from_form` (all three over the shared `_by_exercise_id`) and `_extra_exercises_from_form` in `routes.py` do the field parsing; `REPS_FIELD_PREFIX`, `WEIGHT_FIELD_PREFIX`, `SETS_FIELD_PREFIX`, `EXTRA_NAME_FIELD`, `EXTRA_REPS_FIELD`, `EXTRA_WEIGHT_FIELD`, `EXTRA_SETS_FIELD`, `MODE_FIELD`, `CATEGORY_FIELD` and `CATEGORY_LABEL_FIELD` (both on the create page), `USER_FIELD`, `DAY_FIELD` (the analytics query string's open day) and `COMMENT_FIELD` are the single source of the field-name conventions.
+`_repetitions_from_form`, `_weights_from_form`, `_sets_from_form` (all three over the shared `_by_exercise_id`) and `_extra_exercises_from_form` in `routes.py` do the field parsing; `REPS_FIELD_PREFIX`, `WEIGHT_FIELD_PREFIX`, `SETS_FIELD_PREFIX`, `EXTRA_NAME_FIELD`, `EXTRA_REPS_FIELD`, `EXTRA_WEIGHT_FIELD`, `EXTRA_SETS_FIELD`, `MODE_FIELD`, `CATEGORY_FIELD` (the create page's sort of sport and the analytics sport filter) and `CATEGORY_LABEL_FIELD` (the create page), `USER_FIELD`, `DAY_FIELD` (the analytics query string's open day) and `COMMENT_FIELD` are the single source of the field-name conventions.
 
 ### Analytics page
 
@@ -280,25 +280,39 @@ every section below is then computed for that user alone. No `user_id`, a blank 
 id that no longer exists all fall back to "All users" — `_selected_user_id` in `routes.py`
 returns `None` and `services.get_user` returns `None` for an unknown id.
 
-A `day` in the query string opens the activity map on that date — `/analytics?user_id=N&day=2026-09-01#day` — which is what a click on a cell produces. `_selected_day` in `routes.py` parses it and falls back to `None` for anything that isn't a date, the way an unknown user id falls back to "All users", so a hand-edited link renders the page without its panel rather than raising. The user filter carries the open day through in a hidden field, so switching person keeps the day rather than closing it.
+Next to it, in the same form, a `category` dropdown (`CATEGORY_FIELD`, the name the
+create page already uses) narrows every section to **one sort of sport** — "All sports"
+being the blank default. The analytics route looks the value up in `category_map()` and
+passes the row to the template as `sport`, so anything the table doesn't hold falls back
+to all sports the way an unknown user id falls back to all users. The two filters
+combine: `/analytics?user_id=N&category=judo` is one person's judo. What a session counts
+as is **`WorkoutSession.category`**, the copy taken when it was logged — the same value
+the activity map colours by — so re-labelling a workout does not move its past sessions
+from one filter to another. Every link back to the page (a day cell, "Close this day")
+is built from `filter_args`, the route's `{user_id, category}`, so following one keeps
+both filters; `None` values drop out of the query string.
 
-Each analytics service takes `user_id: int | None = None`, and `_for_user(query, user_id)`
-applies the filter (before grouping, so it lands in the WHERE clause) or leaves the query
-alone for `None`. `exercise_repetitions` joins `WorkoutSession` in its totals queries — a
+A `day` in the query string opens the activity map on that date — `/analytics?user_id=N&day=2026-09-01#day` — which is what a click on a cell produces. `_selected_day` in `routes.py` parses it and falls back to `None` for anything that isn't a date, the way an unknown user id falls back to "All users", so a hand-edited link renders the page without its panel rather than raising. The filter form carries the open day through in a hidden field, so switching person or sport keeps the day rather than closing it.
+
+Each analytics service takes `user_id: int | None = None` and `category: str | None =
+None`, and `_filtered(query, user_id, category)` applies whichever of the two is set
+(before grouping, so it lands in the WHERE clause) and leaves the query alone for `None`. `exercise_repetitions` joins `WorkoutSession` in its totals queries — a
 join it does not otherwise need — purely so those totals can be filtered too.
 
-Picking a user narrows *what is listed*, not just the counts. Across everyone the two
-tables double as a list of what exists, so rows at zero belong there; on one person's page
-they are noise:
+Picking a user or a sport narrows *what is listed*, not just the counts. Across everyone
+and every sport the two tables double as a list of what exists, so rows at zero belong
+there; on a filtered page they are noise:
 
-- `workout_frequency` lists only the workouts the selected user has performed — an inner
-  join for a `user_id`, an `outerjoin` for everyone.
+- `workout_frequency` lists only the workouts performed under the filter — an inner
+  join for a `user_id` or a `category`, an `outerjoin` when neither is set.
 - `exercise_repetitions` drops any exercise with `times` 0, which is exactly the set that
   would otherwise render as "Not performed yet" (`heatmap` is `None` for the same rows).
   An exercise logged with 0 repetitions was still *part of* a session, so it stays.
 
-Either section can therefore come out empty for a user who has tracked nothing, and each
-renders its own "hasn't performed … yet" message instead of the across-everyone one.
+Either section can therefore come out empty for a user who has tracked nothing, or a
+sport nobody has done, and each renders its own "hasn't performed … yet" message ("Sam
+hasn't performed a workout in Judo yet", "Nobody has performed …") instead of the
+across-everyone one.
 
 Five sections, in this order (a test asserts the order):
 
@@ -333,7 +347,7 @@ Five sections, in this order (a test asserts the order):
    on this day by …" once another is picked.
 2. `workout_frequency()` — sessions per workout, most frequent first, including workouts never performed. Each row also carries `feelings`, a count per value of `FEELINGS`, rendered as Good/Okay/Bad columns; the total session count above the table is just `frequency | sum(attribute='count')` in the template, not a service call.
 3. `feeling_trend()` — one entry per day for the last `TREND_DAYS` (30) days, oldest first; rest days have `sessions` 0 and `score`/`feeling` `None`, and a day with several sessions gets their average score with the label rounded half-up.
-4. `exercise_repetitions()` — one entry per exercise, grouped **by exercise name**, so an exercise appearing in several workouts (or logged as an extra) is reported once. `workouts` names where the repetitions actually **came from** — the workouts of the sessions the exercise was logged in — not every workout that happens to contain an exercise of that name. An extra belongs to no workout, so an exercise done only as an extra lists none; otherwise doing "Squats" as an extra during Arm day would label it "Leg day" and imply a workout that was never performed. An exercise nobody has performed has no sessions to go on and falls back to the workouts it belongs to, which is the only thing there is to say about it — that is what the "Not performed yet · Leg day" caption shows. Alongside the totals (`repetitions`, `weight`, `times`, `workouts`, `extra`) each row carries `heatmap`: its own calendar grid of the last `EXERCISE_HEATMAP_DAYS` (365) days, counting repetitions per day and summing them when an exercise landed twice on one date (possible across two sessions). `heatmap` is `None` for an exercise never performed, which the template renders as "Not performed yet" with no grid. Each row also carries `trend` from **`_repetition_trend`**: it splits the exercise's own history — first performed date to last — into two equal-length halves and compares the repetitions in each, giving `direction` (`"up"`, `"down"`, `"similar"` or `None`), both half totals, the `split` date and `change` as a fraction. Within ±`REPETITION_TREND_TOLERANCE` (15%) counts as `"similar"`; `direction` is `None` when everything falls on one date, and `change` is `None` when the earlier half is 0 (no baseline to be a percentage of), which the badge renders as a direction with no percentage. The trend reads the whole history, not just the heatmap window, so an old session can shape a trend whose grid looks empty.
+4. `exercise_repetitions()` — one entry per exercise, grouped **by exercise name**, so an exercise appearing in several workouts (or logged as an extra) is reported once. `workouts` names where the repetitions actually **came from** — the workouts of the sessions the exercise was logged in — not every workout that happens to contain an exercise of that name. An extra belongs to no workout, so an exercise done only as an extra lists none; otherwise doing "Squats" as an extra during Arm day would label it "Leg day" and imply a workout that was never performed. An exercise nobody has performed has no sessions to go on and falls back to the workouts it belongs to, which is the only thing there is to say about it — that is what the "Not performed yet · Leg day" caption shows. Alongside the totals (`repetitions`, `weight`, `times`, `workouts`, `extra`) each row carries `heatmap`: its own calendar grid of the last `EXERCISE_HEATMAP_DAYS` (365) days, counting repetitions per day and summing them when an exercise landed twice on one date (possible across two sessions). `heatmap` is `None` for an exercise never performed, which the template renders as "Not performed yet" with no grid. Each row also carries `trend` from **`_repetition_trend`**: it compares the repetitions of the exercise's **last two sessions** — ordered by date, then session id, so two sessions on one day compete rather than being merged the way the heatmap merges them — giving `direction` (`"up"`, `"down"`, `"similar"` or `None`), `previous` and `latest` repetitions with their `previous_date`/`latest_date` (`date`s, formatted in the template), and `change`, the **absolute** difference `latest - previous` in repetitions. Only a difference of exactly 0 is `"similar"`; `direction` and `change` are `None` for an exercise logged in fewer than two sessions, which gets no badge. The last two sessions can predate the heatmap window, so a trend can sit over a grid that looks empty.
 
    Next to the repetitions each row carries `weight` — the weight moved over the
    exercise's whole history, `weight_moved` summed — `weighted`, whether any set
@@ -374,8 +388,8 @@ Five sections, in this order (a test asserts the order):
    Only the newest `limit` notes come back, `COMMENT_LIMIT` (5) by default — this is the
    one section that does *not* list everything it knows about. The cut is a SQL LIMIT
    after the `order_by`, so it keeps the newest rather than whichever rows came back
-   first, and it lands after `_for_user`: picking a user shows their last 5, not their
-   share of everyone's last 5. Routes pass `COMMENT_LIMIT` to the template as
+   first, and it lands after `_filtered`: picking a user or a sport shows its last 5, not
+   its share of everyone's last 5. Routes pass `COMMENT_LIMIT` to the template as
    `comment_limit` so the section's "The last 5 notes…" copy is built from the same
    constant the query uses and cannot drift from it.
 

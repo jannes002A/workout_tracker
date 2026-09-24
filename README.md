@@ -183,14 +183,18 @@ one.
 
 ### Analytics — `/analytics`
 
-A dropdown at the top picks whose numbers to show. "All users" is the default
-and covers everyone; picking a person reloads the page as `/analytics?user_id=N`
-and narrows every section below to them. It's a plain GET form with a submit
-button, so it works without JavaScript.
+Two dropdowns at the top pick whose numbers to show and for which sort of
+sport. "All users" and "All sports" are the defaults and cover everything;
+picking a person reloads the page as `/analytics?user_id=N`, picking a sport as
+`/analytics?category=judo`, and the two combine, narrowing every section below
+to that person's sessions of that sport. A session counts as the sport its
+workout was when it was logged, so re-labelling a workout later doesn't move its
+past sessions to another sport. It's a plain GET form with a submit button, so
+it works without JavaScript, and clicking a day on the map keeps both filters.
 
-Picking a user narrows *what is listed*, not just the counts. Across everyone
-the workout and exercise tables double as a list of what exists, so entries
-nobody has performed belong there; on one person's page they'd be noise, so
+Picking a user or a sport narrows *what is listed*, not just the counts. Across
+everyone the workout and exercise tables double as a list of what exists, so
+entries nobody has performed belong there; on a filtered page they'd be noise, so
 workouts they've never done and exercises they've never performed are left out
 entirely. Either section can therefore come out empty for someone who has
 tracked nothing.
@@ -240,12 +244,11 @@ Five sections, top to bottom:
    sets that carried something.
 
    Each exercise carries a trend badge — **↑ going up**, **↓ going down** or
-   **→ holding steady** — comparing the first half of that exercise's history
-   with the second half, with the percentage change where there is an earlier
-   baseline to compare against. A change within 15% either way counts as
-   holding steady. Hover the badge for both half-totals and the split date. An
-   exercise performed on only one date gets no badge, since there is nothing to
-   compare.
+   **→ holding steady** — comparing the repetitions of the last two sessions
+   that exercise was logged in, with the absolute difference in repetitions
+   (e.g. "+10 reps"). Only an identical count is holding steady. Hover the
+   badge for both sessions' repetitions and dates. An exercise logged in only
+   one session gets no badge, since there is nothing to compare.
 5. **Session comments** — the last 5 notes written on the track page, most
    recent first, each with its date, workout, how it felt and (in the
    across-everyone view) who wrote it. Sessions without a note are left out, so
